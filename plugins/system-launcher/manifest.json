@@ -1,0 +1,8 @@
+{
+  "id": "system-launcher",
+  "name": "System Launcher",
+  "version": "1.0.0",
+  "description": "Adds quick launcher shortcuts for desktop workflows.",
+  "entryCommand": "/launch",
+  "permissionLevel": "confirm"
+}

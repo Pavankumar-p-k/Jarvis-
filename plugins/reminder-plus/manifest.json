@@ -1,0 +1,8 @@
+{
+  "id": "reminder-plus",
+  "name": "Reminder Plus",
+  "version": "1.0.0",
+  "description": "Provides reminder templating and quick checklist command hooks.",
+  "entryCommand": "/remindplus",
+  "permissionLevel": "safe"
+}
