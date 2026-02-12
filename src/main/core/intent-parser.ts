@@ -11,11 +11,6 @@ export class IntentParser {
       return { type: "unknown", confidence: 0, entities: {} };
     }
 
-    if (includesAny(text, ["open ", "launch ", "start "])) {
-      const app = text.replace(/^(open|launch|start)\s+/, "");
-      return { type: "open_app", confidence: 0.92, entities: { app } };
-    }
-
     if (includesAny(text, ["play ", "resume music", "music on"])) {
       return { type: "play_media", confidence: 0.85, entities: {} };
     }
@@ -35,6 +30,14 @@ export class IntentParser {
     if (includesAny(text, ["run routine", "start routine", "routine "])) {
       const name = text.replace(/^(run|start)?\s*routine\s+/, "");
       return { type: "run_routine", confidence: 0.88, entities: { name } };
+    }
+
+    const openMatch = text.match(/^(open|launch|start|run)\s+(.+)$/);
+    if (openMatch) {
+      const app = (openMatch[2] ?? "").trim();
+      if (app && !app.startsWith("routine ")) {
+        return { type: "open_app", confidence: 0.92, entities: { app } };
+      }
     }
 
     if (includesAny(text, ["list reminders", "show reminders"])) {
@@ -86,7 +89,7 @@ export class IntentParser {
   }
 
   requiredPermission(intent: IntentType): "safe" | "confirm" | "admin" {
-    if (intent === "open_app" || intent === "run_routine") {
+    if (intent === "run_routine") {
       return "confirm";
     }
     return "safe";

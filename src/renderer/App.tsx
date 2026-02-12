@@ -11,14 +11,34 @@ import { TelemetryPanel } from "./components/TelemetryPanel";
 import { VoiceOrb } from "./components/VoiceOrb";
 import { useMicLevel } from "./hooks/useMicLevel";
 
+type TerminalLineKind = "command" | "reply" | "error" | "hint";
+
+interface TerminalLine {
+  id: string;
+  kind: TerminalLineKind;
+  text: string;
+}
+
 const stateAgeLabel = (iso: string): string => {
   const ms = Date.now() - Date.parse(iso);
   const sec = Math.max(0, Math.round(ms / 1000));
   return `${sec}s ago`;
 };
 
+const dateStamp = (value: Date): string =>
+  value
+    .toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit"
+    })
+    .toUpperCase();
+
 export const App = (): JSX.Element => {
   const [state, setState] = useState<AssistantState | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [now, setNow] = useState<Date>(() => new Date());
+  const [audioCuesEnabled, setAudioCuesEnabled] = useState(true);
   const [commandInput, setCommandInput] = useState("");
   const [resultMessage, setResultMessage] = useState("Ready.");
   const [pendingConfirmation, setPendingConfirmation] = useState<string | null>(null);
@@ -28,17 +48,70 @@ export const App = (): JSX.Element => {
   const micLevel = useMicLevel();
 
   const mode: MissionMode = state?.mode ?? "work";
+  const commandCount = useMemo(() => state?.commandHistory.length ?? 0, [state]);
+
+  const playCue = (frequency: number, durationSec = 0.06): void => {
+    if (!audioCuesEnabled) {
+      return;
+    }
+    try {
+      const context = new window.AudioContext();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "triangle";
+      oscillator.frequency.value = frequency;
+      gain.gain.value = 0.0001;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      const start = context.currentTime;
+      gain.gain.exponentialRampToValueAtTime(0.026, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + durationSec);
+      oscillator.start(start);
+      oscillator.stop(start + durationSec);
+      oscillator.onended = () => {
+        void context.close();
+      };
+    } catch {
+      // Ignore WebAudio failures on restricted devices.
+    }
+  };
 
   const refreshState = async (): Promise<void> => {
+    if (typeof window.jarvisApi?.getState !== "function") {
+      throw new Error("Desktop bridge unavailable. Start Jarvis in Electron (npm run dev), not browser-only Vite.");
+    }
     const next = await window.jarvisApi.getState();
     setState(next);
+    setBootError(null);
   };
 
   useEffect(() => {
-    void refreshState();
+    let active = true;
+    const sync = async (): Promise<void> => {
+      try {
+        await refreshState();
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "Unable to initialize Jarvis runtime.";
+        setBootError(message);
+      }
+    };
+    void sync();
     const timer = window.setInterval(() => {
-      void refreshState();
+      void sync();
     }, 8000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -47,39 +120,79 @@ export const App = (): JSX.Element => {
     if (!command || busy) {
       return;
     }
+    playCue(420, 0.045);
     setBusy(true);
     try {
       const response = await window.jarvisApi.runCommand(command, bypassConfirmation);
       setState(response.state);
       setResultMessage(response.result.message);
       if (response.result.needsConfirmation) {
+        playCue(260, 0.09);
         setPendingConfirmation(command);
       } else {
+        playCue(response.result.ok ? 720 : 180, response.result.ok ? 0.05 : 0.1);
         setPendingConfirmation(null);
       }
     } catch {
+      playCue(160, 0.1);
       setResultMessage("Command failed.");
     } finally {
       setBusy(false);
     }
   };
 
-  const commandCount = useMemo(() => state?.commandHistory.length ?? 0, [state]);
+  const terminalLines = useMemo<TerminalLine[]>(() => {
+    if (!state) {
+      return [];
+    }
+    const historyLines = [...state.commandHistory.slice(0, 8)].reverse().flatMap<TerminalLine>((item) => [
+      { id: `${item.id}-cmd`, kind: "command", text: `> ${item.command}` },
+      {
+        id: `${item.id}-res`,
+        kind: item.success ? "reply" : "error",
+        text: item.resultMessage
+      }
+    ]);
+    const hints = state.suggestions.slice(0, 4).map<TerminalLine>((item) => ({
+      id: item.id,
+      kind: "hint",
+      text: `[hint] ${item.text}`
+    }));
+    return [...historyLines, ...hints].slice(-18);
+  }, [state]);
 
   if (!state) {
-    return <div className="booting">Booting Jarvis Core...</div>;
+    return (
+      <div className="booting">
+        <div>
+          <div>Booting Jarvis Core...</div>
+          {bootError && <small>{bootError}</small>}
+        </div>
+      </div>
+    );
   }
+
+  const clock = now.toLocaleTimeString(undefined, {
+    hour12: true,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  const networkState = state.telemetry.networkRxKb + state.telemetry.networkTxKb > 0 ? "ONLINE" : "OFFLINE";
 
   return (
     <div className={`jarvis-app mode-${mode}`}>
       <HudBackground mode={mode} />
-      <header className="topbar">
-        <div>
-          <h1>JARVIS CONTROL MATRIX</h1>
-          <p>Offline command center | Mission mode: {state.mode}</p>
+
+      <header className="panel-frame hud-header">
+        <div className="hud-headline">
+          <h1>JARVIS SCIENTIFIC TERMINAL</h1>
+          <p>eDEX-style command cockpit | mode {state.mode}</p>
         </div>
-        <div className="topbar-stats">
-          <span>{commandCount} commands logged</span>
+        <div className="hud-metrics">
+          <span>{clock}</span>
+          <span>{dateStamp(now)}</span>
+          <span>{commandCount} commands</span>
           <span>Telemetry {stateAgeLabel(state.telemetry.timestampIso)}</span>
           <button
             className="mini-btn"
@@ -87,6 +200,7 @@ export const App = (): JSX.Element => {
               const data = await window.jarvisApi.generateBriefing();
               setBriefing(data);
               setResultMessage(data.headline);
+              playCue(880, 0.05);
             }}
           >
             Morning Briefing
@@ -94,126 +208,224 @@ export const App = (): JSX.Element => {
         </div>
       </header>
 
-      <main className="layout">
-        <aside className="col left">
-          <TelemetryPanel telemetry={state.telemetry} />
-          <MissionModes
-            activeMode={state.mode}
-            onModeChange={async (nextMode) => {
-              const updated = await window.jarvisApi.setMode(nextMode);
-              setState(updated);
-              setResultMessage(`Mode changed to ${nextMode}`);
-            }}
-          />
-          <AutomationBoard
-            automations={state.automations}
-            onToggle={async (id, enabled) => {
-              const updated = await window.jarvisApi.setAutomationEnabled(id, enabled);
-              setState(updated);
-              setResultMessage(`Automation ${enabled ? "enabled" : "disabled"}.`);
-            }}
-          />
+      <main className="hud-layout">
+        <aside className="hud-column left-col">
+          <section className="panel clock-panel">
+            <header className="panel-title">
+              <span>PANEL</span>
+              <span>SYSTEM</span>
+            </header>
+            <div className="clock-time">{clock}</div>
+            <div className="clock-date">{dateStamp(now)}</div>
+            <div className="clock-grid">
+              <div>
+                <label>UPTIME</label>
+                <strong>{Math.floor(state.telemetry.uptimeSec / 60)}m</strong>
+              </div>
+              <div>
+                <label>MODE</label>
+                <strong>{state.mode.toUpperCase()}</strong>
+              </div>
+              <div>
+                <label>RX</label>
+                <strong>{state.telemetry.networkRxKb} KB</strong>
+              </div>
+              <div>
+                <label>TX</label>
+                <strong>{state.telemetry.networkTxKb} KB</strong>
+              </div>
+            </div>
+          </section>
+
+          <div className="column-scroll">
+            <TelemetryPanel telemetry={state.telemetry} />
+            <MissionModes
+              activeMode={state.mode}
+              onModeChange={async (nextMode) => {
+                const updated = await window.jarvisApi.setMode(nextMode);
+                setState(updated);
+                setResultMessage(`Mode changed to ${nextMode}`);
+                playCue(640, 0.05);
+              }}
+            />
+          </div>
         </aside>
 
-        <section className="col center">
-          <section className="panel orb-panel">
-            <VoiceOrb level={micLevel} mode={state.mode} />
+        <section className="hud-column center-col">
+          <section className="panel terminal-panel">
+            <header className="panel-title">
+              <span>MAIN</span>
+              <span>COMMAND STREAM</span>
+            </header>
+            <div className="terminal-stream">
+              {terminalLines.length > 0 ? (
+                terminalLines.map((line) => (
+                  <p key={line.id} className={`terminal-line ${line.kind}`}>
+                    {line.text}
+                  </p>
+                ))
+              ) : (
+                <p className="empty">No command history yet. Try: open chrome or /mode focus</p>
+              )}
+            </div>
+            <div className="result-line">[{mode}] {resultMessage}</div>
+            <form
+              className="command-form terminal-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void runCommand(commandInput);
+                setCommandInput("");
+              }}
+            >
+              <span className="terminal-prompt">{busy ? "..." : ">"}</span>
+              <input
+                value={commandInput}
+                onChange={(event) => setCommandInput(event.target.value)}
+                placeholder="open chrome | remind me in 20m | /mode focus | /ask summarize pending tasks"
+              />
+              <button type="submit" disabled={busy}>
+                Execute
+              </button>
+              {pendingConfirmation && (
+                <button
+                  type="button"
+                  className="confirm-btn"
+                  onClick={() => {
+                    void runCommand(pendingConfirmation, true);
+                    setPendingConfirmation(null);
+                  }}
+                >
+                  Confirm
+                </button>
+              )}
+            </form>
           </section>
-          <AgentTabs
-            activeAgent={activeAgent}
-            onChange={setActiveAgent}
-            suggestions={state.suggestions}
-            commandHistory={state.commandHistory}
-            commonCommands={state.memory.commonCommands}
-            preferredApps={state.memory.preferredApps}
-            plugins={state.plugins}
-            onReplay={async (id) => {
-              const response = await window.jarvisApi.replayCommand(id);
-              setState(response.state);
-              setResultMessage(`Replayed: ${response.result.message}`);
-            }}
-            onRunCommand={(command) => {
-              void runCommand(command, true);
-            }}
-          />
-          <ProcessMap
-            processes={state.telemetry.topProcesses}
-            onTerminate={async (pid, name) => {
-              const approved = window.confirm(`Terminate process ${name} (PID ${pid})?`);
-              if (!approved) {
-                return;
-              }
-              const response = await window.jarvisApi.terminateProcess(pid, true);
-              setState(response.state);
-              setResultMessage(response.result.message);
-            }}
-          />
+
+          <div className="center-split">
+            <section className="panel orb-panel">
+              <header className="panel-title">
+                <span>VOICE</span>
+                <span>INPUT</span>
+              </header>
+              <VoiceOrb level={micLevel} mode={state.mode} />
+            </section>
+            <AgentTabs
+              activeAgent={activeAgent}
+              onChange={setActiveAgent}
+              suggestions={state.suggestions}
+              commandHistory={state.commandHistory}
+              commonCommands={state.memory.commonCommands}
+              preferredApps={state.memory.preferredApps}
+              plugins={state.plugins}
+              onReplay={async (id) => {
+                const response = await window.jarvisApi.replayCommand(id);
+                setState(response.state);
+                setResultMessage(`Replayed: ${response.result.message}`);
+                playCue(580, 0.045);
+              }}
+              onRunCommand={(command) => {
+                void runCommand(command, true);
+              }}
+            />
+          </div>
         </section>
 
-        <aside className="col right">
-          <PlannerPanel
-            reminders={state.reminders}
-            alarms={state.alarms}
-            onCompleteReminder={async (id) => {
-              const updated = await window.jarvisApi.completeReminder(id);
-              setState(updated);
-              setResultMessage("Reminder completed.");
-            }}
-          />
-          <PluginStore
-            plugins={state.plugins}
-            onReload={async () => {
-              const updated = await window.jarvisApi.reloadPlugins();
-              setState(updated);
-              setResultMessage("Plugins reloaded.");
-            }}
-            onToggle={async (pluginId, enabled) => {
-              const updated = await window.jarvisApi.setPluginEnabled(pluginId, enabled);
-              setState(updated);
-              setResultMessage(`Plugin ${enabled ? "enabled" : "disabled"}.`);
-            }}
-          />
-          {briefing && (
-            <section className="panel briefing-panel">
-              <header className="panel-title">Briefing</header>
-              <p>{briefing.headline}</p>
-              <small>{briefing.suggestedFocus}</small>
-            </section>
-          )}
+        <aside className="hud-column right-col">
+          <section className="panel network-panel">
+            <header className="panel-title">
+              <span>PANEL</span>
+              <span>NETWORK</span>
+            </header>
+            <div className="network-grid">
+              <div>
+                <label>STATUS</label>
+                <strong>{networkState}</strong>
+              </div>
+              <div>
+                <label>STATE</label>
+                <strong>IPv4</strong>
+              </div>
+              <div>
+                <label>PING</label>
+                <strong>-- ms</strong>
+              </div>
+              <div>
+                <label>LINK</label>
+                <strong>LOCAL</strong>
+              </div>
+            </div>
+            <div className="network-globe">{networkState}</div>
+          </section>
+
+          <div className="column-scroll">
+            <PlannerPanel
+              reminders={state.reminders}
+              alarms={state.alarms}
+              onCompleteReminder={async (id) => {
+                const updated = await window.jarvisApi.completeReminder(id);
+                setState(updated);
+                setResultMessage("Reminder completed.");
+                playCue(760, 0.05);
+              }}
+            />
+            <AutomationBoard
+              automations={state.automations}
+              onToggle={async (id, enabled) => {
+                const updated = await window.jarvisApi.setAutomationEnabled(id, enabled);
+                setState(updated);
+                setResultMessage(`Automation ${enabled ? "enabled" : "disabled"}.`);
+                playCue(enabled ? 730 : 320, 0.05);
+              }}
+            />
+            <PluginStore
+              plugins={state.plugins}
+              onReload={async () => {
+                const updated = await window.jarvisApi.reloadPlugins();
+                setState(updated);
+                setResultMessage("Plugins reloaded.");
+                playCue(690, 0.05);
+              }}
+              onToggle={async (pluginId, enabled) => {
+                const updated = await window.jarvisApi.setPluginEnabled(pluginId, enabled);
+                setState(updated);
+                setResultMessage(`Plugin ${enabled ? "enabled" : "disabled"}.`);
+                playCue(enabled ? 760 : 280, 0.05);
+              }}
+            />
+            <ProcessMap
+              processes={state.telemetry.topProcesses}
+              onTerminate={async (pid, name) => {
+                const approved = window.confirm(`Terminate process ${name} (PID ${pid})?`);
+                if (!approved) {
+                  return;
+                }
+                const response = await window.jarvisApi.terminateProcess(pid, true);
+                setState(response.state);
+                setResultMessage(response.result.message);
+                playCue(response.result.ok ? 240 : 150, response.result.ok ? 0.08 : 0.12);
+              }}
+            />
+
+            {briefing && (
+              <section className="panel briefing-panel">
+                <header className="panel-title">Briefing</header>
+                <p>{briefing.headline}</p>
+                <small>{briefing.suggestedFocus}</small>
+              </section>
+            )}
+          </div>
         </aside>
       </main>
 
-      <footer className="command-footer">
-        <div className="result-line">{resultMessage}</div>
-        <form
-          className="command-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void runCommand(commandInput);
-            setCommandInput("");
-          }}
-        >
-          <input
-            value={commandInput}
-            onChange={(event) => setCommandInput(event.target.value)}
-            placeholder="Enter command. ex: open chrome | remind me in 15m | /mode focus | /ask summarize my day"
-          />
-          <button type="submit" disabled={busy}>
-            Execute
-          </button>
-          {pendingConfirmation && (
-            <button
-              type="button"
-              className="confirm-btn"
-              onClick={() => {
-                void runCommand(pendingConfirmation, true);
-                setPendingConfirmation(null);
-              }}
-            >
-              Confirm Action
-            </button>
-          )}
-        </form>
+      <footer className="panel-frame hud-footer">
+        <div className="footer-kbd">
+          {["ESC", "TAB", "CAPS", "SHIFT", "CTRL", "ALT", "ENTER"].map((key) => (
+            <span key={key}>{key}</span>
+          ))}
+        </div>
+        <button className="mini-btn" onClick={() => setAudioCuesEnabled((prev) => !prev)}>
+          Audio {audioCuesEnabled ? "ON" : "OFF"}
+        </button>
       </footer>
     </div>
   );

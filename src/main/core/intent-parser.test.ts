@@ -27,4 +27,14 @@ describe("IntentParser", () => {
     const parsed = parser.parse("hello jarvis");
     expect(parsed.type).toBe("unknown");
   });
+
+  it("does not misclassify start routine as app launch", () => {
+    const parsed = parser.parse("start routine good morning");
+    expect(parsed.type).toBe("run_routine");
+    expect(parsed.entities.name).toContain("good morning");
+  });
+
+  it("treats app launch as safe by default", () => {
+    expect(parser.requiredPermission("open_app")).toBe("safe");
+  });
 });
