@@ -6,7 +6,7 @@ export class LocalLlmAdapter {
 
   async ask(prompt: string): Promise<string | null> {
     try {
-      const response = await fetch(this.endpoint, {
+      const response = (await fetch(this.endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -16,11 +16,14 @@ export class LocalLlmAdapter {
           prompt,
           stream: false
         })
-      });
+      })) as unknown as {
+        ok: boolean;
+        json: () => Promise<{ response?: string }>;
+      };
       if (!response.ok) {
         return null;
       }
-      const payload = (await response.json()) as { response?: string };
+      const payload = await response.json();
       return payload.response ?? null;
     } catch {
       return null;

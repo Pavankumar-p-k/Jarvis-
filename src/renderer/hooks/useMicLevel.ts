@@ -24,7 +24,7 @@ export const useMicLevel = (): number => {
       if (!analyser || !dataArray) {
         return;
       }
-      analyser.getByteFrequencyData(dataArray);
+      analyser.getByteFrequencyData(dataArray as unknown as Uint8Array<ArrayBuffer>);
       const total = dataArray.reduce((acc, value) => acc + value, 0);
       const avg = total / dataArray.length / 255;
       setLevel(Math.max(0.05, Math.min(1, avg * 1.8)));

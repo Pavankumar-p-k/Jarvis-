@@ -103,7 +103,7 @@ export class JarvisRuntime {
   private readonly stateStore: JsonStore<AssistantState>;
   private state: AssistantState;
 
-  constructor(private readonly options: RuntimeOptions) {
+  constructor(options: RuntimeOptions) {
     this.stateStore = new JsonStore(join(options.dataDir, "state.json"));
     this.pluginService = new PluginService(options.pluginsDir, this.logger);
     this.state = buildDefaultState();
