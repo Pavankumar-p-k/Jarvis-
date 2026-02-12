@@ -10,7 +10,13 @@ const api: JarvisApi = {
   completeReminder: async (id: string) => ipcRenderer.invoke(IPC_CHANNELS.completeReminder, id),
   replayCommand: async (id: string) => ipcRenderer.invoke(IPC_CHANNELS.replayCommand, id),
   generateBriefing: async () => ipcRenderer.invoke(IPC_CHANNELS.generateBriefing),
-  reloadPlugins: async () => ipcRenderer.invoke(IPC_CHANNELS.reloadPlugins)
+  reloadPlugins: async () => ipcRenderer.invoke(IPC_CHANNELS.reloadPlugins),
+  setAutomationEnabled: async (id: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.setAutomationEnabled, id, enabled),
+  setPluginEnabled: async (pluginId: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.setPluginEnabled, pluginId, enabled),
+  terminateProcess: async (pid: number, bypassConfirmation = false) =>
+    ipcRenderer.invoke(IPC_CHANNELS.terminateProcess, pid, bypassConfirmation)
 };
 
 contextBridge.exposeInMainWorld("jarvisApi", api);

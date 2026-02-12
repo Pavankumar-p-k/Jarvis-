@@ -3,9 +3,10 @@ import type { PluginState } from "../../shared/contracts";
 interface PluginStoreProps {
   plugins: PluginState[];
   onReload: () => void;
+  onToggle: (pluginId: string, enabled: boolean) => void;
 }
 
-export const PluginStore = ({ plugins, onReload }: PluginStoreProps): JSX.Element => {
+export const PluginStore = ({ plugins, onReload, onToggle }: PluginStoreProps): JSX.Element => {
   return (
     <section className="panel plugin-store">
       <header className="panel-title">
@@ -23,6 +24,16 @@ export const PluginStore = ({ plugins, onReload }: PluginStoreProps): JSX.Elemen
             <small>
               {plugin.manifest.entryCommand} | {plugin.manifest.permissionLevel}
             </small>
+            <div className="plugin-actions">
+              <strong>{plugin.enabled ? "Enabled" : "Disabled"}</strong>
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => onToggle(plugin.manifest.id, !plugin.enabled)}
+              >
+                {plugin.enabled ? "Disable" : "Enable"}
+              </button>
+            </div>
           </article>
         ))}
       </div>

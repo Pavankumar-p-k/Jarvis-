@@ -105,7 +105,14 @@ export const App = (): JSX.Element => {
               setResultMessage(`Mode changed to ${nextMode}`);
             }}
           />
-          <AutomationBoard automations={state.automations} />
+          <AutomationBoard
+            automations={state.automations}
+            onToggle={async (id, enabled) => {
+              const updated = await window.jarvisApi.setAutomationEnabled(id, enabled);
+              setState(updated);
+              setResultMessage(`Automation ${enabled ? "enabled" : "disabled"}.`);
+            }}
+          />
         </aside>
 
         <section className="col center">
@@ -117,13 +124,30 @@ export const App = (): JSX.Element => {
             onChange={setActiveAgent}
             suggestions={state.suggestions}
             commandHistory={state.commandHistory}
+            commonCommands={state.memory.commonCommands}
+            preferredApps={state.memory.preferredApps}
+            plugins={state.plugins}
             onReplay={async (id) => {
               const response = await window.jarvisApi.replayCommand(id);
               setState(response.state);
               setResultMessage(`Replayed: ${response.result.message}`);
             }}
+            onRunCommand={(command) => {
+              void runCommand(command, true);
+            }}
           />
-          <ProcessMap processes={state.telemetry.topProcesses} />
+          <ProcessMap
+            processes={state.telemetry.topProcesses}
+            onTerminate={async (pid, name) => {
+              const approved = window.confirm(`Terminate process ${name} (PID ${pid})?`);
+              if (!approved) {
+                return;
+              }
+              const response = await window.jarvisApi.terminateProcess(pid, true);
+              setState(response.state);
+              setResultMessage(response.result.message);
+            }}
+          />
         </section>
 
         <aside className="col right">
@@ -142,6 +166,11 @@ export const App = (): JSX.Element => {
               const updated = await window.jarvisApi.reloadPlugins();
               setState(updated);
               setResultMessage("Plugins reloaded.");
+            }}
+            onToggle={async (pluginId, enabled) => {
+              const updated = await window.jarvisApi.setPluginEnabled(pluginId, enabled);
+              setState(updated);
+              setResultMessage(`Plugin ${enabled ? "enabled" : "disabled"}.`);
             }}
           />
           {briefing && (

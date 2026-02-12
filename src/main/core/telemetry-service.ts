@@ -3,6 +3,7 @@ import { execSync } from "node:child_process";
 import type { ProcessInfo, ProcessNode, TelemetrySnapshot } from "../../shared/contracts";
 
 const bytesToMb = (value: number): number => Math.round(value / (1024 * 1024));
+const bytesToKb = (value: number): number => Math.round(value / 1024);
 
 const parseWindowsTopProcesses = (): ProcessInfo[] => {
   try {
@@ -31,6 +32,24 @@ const parseWindowsTopProcesses = (): ProcessInfo[] => {
   }
 };
 
+const parseNetworkTotals = (): { rxKb: number; txKb: number } => {
+  try {
+    const output = execSync("netstat -e", { encoding: "utf8", windowsHide: true });
+    const match = output.match(/Bytes\s+([\d,]+)\s+([\d,]+)/i);
+    if (!match) {
+      return { rxKb: 0, txKb: 0 };
+    }
+    const rxBytes = Number((match[1] ?? "0").replace(/[^\d]/g, ""));
+    const txBytes = Number((match[2] ?? "0").replace(/[^\d]/g, ""));
+    return {
+      rxKb: bytesToKb(rxBytes),
+      txKb: bytesToKb(txBytes)
+    };
+  } catch {
+    return { rxKb: 0, txKb: 0 };
+  }
+};
+
 export class TelemetryService {
   private previousCpu = this.getCpuSample();
 
@@ -42,14 +61,15 @@ export class TelemetryService {
     const memoryTotalMb = bytesToMb(totalmem());
     const memoryUsedMb = memoryTotalMb - bytesToMb(freemem());
     const topProcesses = parseWindowsTopProcesses();
+    const network = parseNetworkTotals();
 
     return {
       cpuPercent,
       memoryUsedMb,
       memoryTotalMb,
       uptimeSec: Math.round(uptime()),
-      networkRxKb: 0,
-      networkTxKb: 0,
+      networkRxKb: network.rxKb,
+      networkTxKb: network.txKb,
       topProcesses,
       timestampIso: new Date().toISOString()
     };

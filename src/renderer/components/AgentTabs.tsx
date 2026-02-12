@@ -1,11 +1,15 @@
-import type { AgentType, CommandRecord, SuggestionItem } from "../../shared/contracts";
+import type { AgentType, CommandRecord, PluginState, SuggestionItem } from "../../shared/contracts";
 
 interface AgentTabsProps {
   activeAgent: AgentType;
   onChange: (agent: AgentType) => void;
   suggestions: SuggestionItem[];
   commandHistory: CommandRecord[];
+  commonCommands: string[];
+  preferredApps: string[];
+  plugins: PluginState[];
   onReplay: (id: string) => void;
+  onRunCommand: (command: string) => void;
 }
 
 const tabs: Array<{ id: AgentType; label: string }> = [
@@ -20,8 +24,14 @@ export const AgentTabs = ({
   onChange,
   suggestions,
   commandHistory,
-  onReplay
+  commonCommands,
+  preferredApps,
+  plugins,
+  onReplay,
+  onRunCommand
 }: AgentTabsProps): JSX.Element => {
+  const recentAsk = commandHistory.filter((item) => item.command.startsWith("/ask")).slice(0, 4);
+
   return (
     <section className="panel agent-tabs">
       <header className="panel-title">Agents</header>
@@ -50,13 +60,30 @@ export const AgentTabs = ({
 
       {activeAgent === "coder" && (
         <div className="tab-content">
+          {recentAsk.length > 0 ? (
+            recentAsk.map((item) => (
+              <article key={item.id}>
+                <strong>{item.command}</strong>
+                <small>{item.resultMessage}</small>
+              </article>
+            ))
+          ) : (
+            <article>
+              <strong>No local LLM requests yet</strong>
+              <small>Try command: /ask create today coding plan</small>
+            </article>
+          )}
           <article>
-            <strong>Offline code mode</strong>
-            <small>Use /ask for local model responses when available.</small>
+            <strong>Quick code memory</strong>
+            <small>
+              {commonCommands.slice(0, 3).join(" | ") || "No command history yet."}
+            </small>
           </article>
           <article>
             <strong>Plugin commands</strong>
-            <small>Use plugin entry commands to extend assistant behaviors.</small>
+            <small>
+              {plugins.map((plugin) => plugin.manifest.entryCommand).join(" | ") || "No plugins loaded."}
+            </small>
           </article>
         </div>
       )}
@@ -68,8 +95,19 @@ export const AgentTabs = ({
             <small>Mic orb reacts to live audio amplitude.</small>
           </article>
           <article>
-            <strong>Media controls</strong>
-            <small>Try: play music, pause music.</small>
+            <strong>Quick media controls</strong>
+            <div className="quick-actions">
+              <button type="button" onClick={() => onRunCommand("play music")}>
+                Play/Pause
+              </button>
+              <button type="button" onClick={() => onRunCommand("pause music")}>
+                Pause
+              </button>
+              <button type="button" onClick={() => onRunCommand("open spotify")}>
+                Open Spotify
+              </button>
+            </div>
+            <small>Preferred apps: {preferredApps.slice(0, 4).join(", ") || "none"}</small>
           </article>
         </div>
       )}

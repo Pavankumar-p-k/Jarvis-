@@ -2,9 +2,10 @@ import type { AutomationRule } from "../../shared/contracts";
 
 interface AutomationBoardProps {
   automations: AutomationRule[];
+  onToggle: (id: string, enabled: boolean) => void;
 }
 
-export const AutomationBoard = ({ automations }: AutomationBoardProps): JSX.Element => {
+export const AutomationBoard = ({ automations, onToggle }: AutomationBoardProps): JSX.Element => {
   return (
     <section className="panel automation-board">
       <header className="panel-title">Automation Cards</header>
@@ -15,7 +16,16 @@ export const AutomationBoard = ({ automations }: AutomationBoardProps): JSX.Elem
             <p>
               {rule.conditions.length} condition(s), {rule.actions.length} action(s)
             </p>
-            <strong>{rule.enabled ? "Enabled" : "Disabled"}</strong>
+            <div className="auto-actions">
+              <strong>{rule.enabled ? "Enabled" : "Disabled"}</strong>
+              <button
+                className="mini-btn"
+                onClick={() => onToggle(rule.id, !rule.enabled)}
+                type="button"
+              >
+                {rule.enabled ? "Disable" : "Enable"}
+              </button>
+            </div>
           </article>
         ))}
       </div>

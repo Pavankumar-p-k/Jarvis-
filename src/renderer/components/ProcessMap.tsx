@@ -2,9 +2,10 @@ import type { ProcessInfo } from "../../shared/contracts";
 
 interface ProcessMapProps {
   processes: ProcessInfo[];
+  onTerminate: (pid: number, name: string) => void;
 }
 
-export const ProcessMap = ({ processes }: ProcessMapProps): JSX.Element => {
+export const ProcessMap = ({ processes, onTerminate }: ProcessMapProps): JSX.Element => {
   const max = Math.max(...processes.map((item) => item.memoryMb), 1);
   return (
     <section className="panel process-map">
@@ -20,6 +21,9 @@ export const ProcessMap = ({ processes }: ProcessMapProps): JSX.Element => {
               <span style={{ width: `${Math.round((proc.memoryMb / max) * 100)}%` }} />
             </div>
             <strong>{proc.memoryMb} MB</strong>
+            <button type="button" className="danger-btn" onClick={() => onTerminate(proc.pid, proc.name)}>
+              End
+            </button>
           </article>
         ))}
       </div>

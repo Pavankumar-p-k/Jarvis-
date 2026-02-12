@@ -1,4 +1,4 @@
-import { exec, spawn } from "node:child_process";
+import { exec, execSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import type {
   ActionResult,
@@ -118,7 +118,7 @@ export class JarvisRuntime {
     if (this.state.automations.length === 0) {
       this.state.automations = defaultAutomations();
     }
-    this.state.plugins = this.pluginService.loadPlugins();
+    this.state.plugins = this.loadPluginsWithState(this.state.plugins);
     this.refreshTelemetry();
     this.saveState();
 
@@ -172,10 +172,67 @@ export class JarvisRuntime {
   }
 
   async reloadPlugins(): Promise<AssistantState> {
-    this.state.plugins = this.pluginService.loadPlugins();
+    this.state.plugins = this.loadPluginsWithState(this.state.plugins);
     this.pushSuggestion(`Loaded ${this.state.plugins.length} plugin(s).`, "Plugin store");
     this.saveState();
     return this.getState();
+  }
+
+  async setAutomationEnabled(id: string, enabled: boolean): Promise<AssistantState> {
+    const rule = this.state.automations.find((item) => item.id === id);
+    if (rule) {
+      rule.enabled = enabled;
+      this.pushSuggestion(
+        `${rule.name} is now ${enabled ? "enabled" : "disabled"}.`,
+        "Automation control"
+      );
+      this.recordCommand(
+        `automation ${enabled ? "enable" : "disable"} ${rule.name}`,
+        "system_info",
+        { ok: true, message: `Automation updated: ${rule.name}` },
+        true
+      );
+    }
+    this.saveState();
+    return this.getState();
+  }
+
+  async setPluginEnabled(pluginId: string, enabled: boolean): Promise<AssistantState> {
+    const plugin = this.state.plugins.find((item) => item.manifest.id === pluginId);
+    if (plugin) {
+      plugin.enabled = enabled;
+      this.pushSuggestion(
+        `Plugin ${plugin.manifest.name} ${enabled ? "enabled" : "disabled"}.`,
+        "Plugin control"
+      );
+      this.recordCommand(
+        `plugin ${enabled ? "enable" : "disable"} ${plugin.manifest.name}`,
+        "system_info",
+        { ok: true, message: `Plugin updated: ${plugin.manifest.name}` },
+        true
+      );
+    }
+    this.saveState();
+    return this.getState();
+  }
+
+  async terminateProcess(pid: number, bypassConfirmation = false): Promise<CommandResponse> {
+    const requiredPermission: PermissionLevel = "confirm";
+    if (this.guard.needsConfirmation(requiredPermission, bypassConfirmation)) {
+      return {
+        result: {
+          ok: false,
+          message: "Confirmation needed before terminating a process.",
+          needsConfirmation: true
+        },
+        state: this.getState()
+      };
+    }
+
+    const result = this.terminateProcessByPid(pid);
+    this.recordCommand(`terminate process ${pid}`, "system_info", result, true);
+    this.saveState();
+    return { result, state: this.getState() };
   }
 
   async runCommand(rawCommand: string, bypassConfirmation = false): Promise<CommandResponse> {
@@ -304,11 +361,11 @@ export class JarvisRuntime {
     }
 
     if (type === "play_media") {
-      return { ok: true, message: "Media playback command sent." };
+      return this.sendMediaPlayPause("Media play/pause signal sent.");
     }
 
     if (type === "pause_media") {
-      return { ok: true, message: "Media pause command sent." };
+      return this.sendMediaPlayPause("Media pause signal sent.");
     }
 
     if (type === "set_reminder") {
@@ -376,6 +433,31 @@ export class JarvisRuntime {
     spawn("cmd", ["/c", command], { detached: true, stdio: "ignore", windowsHide: true }).unref();
     this.bumpPreferredApp(app);
     return { ok: true, message: `Launching ${app}` };
+  }
+
+  private sendMediaPlayPause(successMessage: string): ActionResult {
+    try {
+      execSync(
+        "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{MEDIA_PLAY_PAUSE}')\"",
+        { windowsHide: true }
+      );
+      return { ok: true, message: successMessage };
+    } catch {
+      return { ok: false, message: "Unable to send media key on this system." };
+    }
+  }
+
+  private terminateProcessByPid(pid: number): ActionResult {
+    if (!Number.isFinite(pid) || pid <= 0) {
+      return { ok: false, message: "Invalid PID." };
+    }
+    try {
+      execSync(`taskkill /PID ${Math.floor(pid)} /F`, { windowsHide: true });
+      this.refreshTelemetry();
+      return { ok: true, message: `Process ${Math.floor(pid)} terminated.` };
+    } catch {
+      return { ok: false, message: `Failed to terminate PID ${Math.floor(pid)}.` };
+    }
   }
 
   private createReminder(entities: Record<string, string>): ReminderItem {
@@ -487,5 +569,26 @@ export class JarvisRuntime {
 
   private saveState(): void {
     this.stateStore.write(this.state);
+  }
+
+  private loadPluginsWithState(previous: AssistantState["plugins"]): AssistantState["plugins"] {
+    const previousList = Array.isArray(previous) ? previous : [];
+    const previousMap = new Map(
+      previousList.map((plugin) => [
+        plugin.manifest.id,
+        { enabled: plugin.enabled, installedAtIso: plugin.installedAtIso }
+      ])
+    );
+    return this.pluginService.loadPlugins().map((plugin) => {
+      const found = previousMap.get(plugin.manifest.id);
+      if (!found) {
+        return plugin;
+      }
+      return {
+        ...plugin,
+        enabled: found.enabled,
+        installedAtIso: found.installedAtIso
+      };
+    });
   }
 }

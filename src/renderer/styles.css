@@ -407,6 +407,15 @@ button:hover {
   color: var(--text-dim);
 }
 
+.auto-actions,
+.plugin-actions {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .auto-card.on strong {
   color: #91ffc7;
 }
@@ -436,6 +445,28 @@ button:hover {
   margin: 0 0 5px;
   color: var(--text-dim);
   font-size: 0.84rem;
+}
+
+.quick-actions {
+  margin: 6px 0;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.quick-actions button {
+  padding: 4px 7px;
+  font-size: 0.8rem;
+}
+
+.danger-btn {
+  background: rgba(79, 20, 20, 0.85);
+  border-color: rgba(231, 96, 96, 0.6);
+  color: #ffd7d7;
+}
+
+.danger-btn:hover {
+  border-color: rgba(255, 139, 139, 0.8);
 }
 
 .empty {

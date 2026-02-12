@@ -25,4 +25,16 @@ export const registerIpcHandlers = (runtime: JarvisRuntime): void => {
 
   ipcMain.handle(IPC_CHANNELS.generateBriefing, async () => runtime.generateBriefing());
   ipcMain.handle(IPC_CHANNELS.reloadPlugins, async () => runtime.reloadPlugins());
+  ipcMain.handle(IPC_CHANNELS.setAutomationEnabled, async (_event, id: string, enabled: boolean) => {
+    return runtime.setAutomationEnabled(id, Boolean(enabled));
+  });
+  ipcMain.handle(IPC_CHANNELS.setPluginEnabled, async (_event, pluginId: string, enabled: boolean) => {
+    return runtime.setPluginEnabled(pluginId, Boolean(enabled));
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.terminateProcess,
+    async (_event, pid: number, bypassConfirmation?: boolean) => {
+      return runtime.terminateProcess(Number(pid), Boolean(bypassConfirmation));
+    }
+  );
 };

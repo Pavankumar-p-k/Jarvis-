@@ -42,6 +42,8 @@ export class PluginService {
 
   findByCommand(command: string, plugins: PluginState[]): PluginState | undefined {
     const text = command.trim().toLowerCase();
-    return plugins.find((plugin) => text.startsWith(plugin.manifest.entryCommand.toLowerCase()));
+    return plugins.find(
+      (plugin) => plugin.enabled && text.startsWith(plugin.manifest.entryCommand.toLowerCase())
+    );
   }
 }

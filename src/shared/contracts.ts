@@ -180,6 +180,9 @@ export interface JarvisApi {
   replayCommand: (id: string) => Promise<CommandResponse>;
   generateBriefing: () => Promise<MorningBriefing>;
   reloadPlugins: () => Promise<AssistantState>;
+  setAutomationEnabled: (id: string, enabled: boolean) => Promise<AssistantState>;
+  setPluginEnabled: (pluginId: string, enabled: boolean) => Promise<AssistantState>;
+  terminateProcess: (pid: number, bypassConfirmation?: boolean) => Promise<CommandResponse>;
 }
 
 export const IPC_CHANNELS = {
@@ -189,5 +192,8 @@ export const IPC_CHANNELS = {
   completeReminder: "jarvis:complete-reminder",
   replayCommand: "jarvis:replay-command",
   generateBriefing: "jarvis:generate-briefing",
-  reloadPlugins: "jarvis:reload-plugins"
+  reloadPlugins: "jarvis:reload-plugins",
+  setAutomationEnabled: "jarvis:set-automation-enabled",
+  setPluginEnabled: "jarvis:set-plugin-enabled",
+  terminateProcess: "jarvis:terminate-process"
 } as const;

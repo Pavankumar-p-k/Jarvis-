@@ -36,6 +36,14 @@ export const TelemetryPanel = ({ telemetry }: TelemetryPanelProps): JSX.Element 
         <span>Updated</span>
         <strong>{new Date(telemetry.timestampIso).toLocaleTimeString()}</strong>
       </div>
+      <div className="metric-row">
+        <span>Net RX</span>
+        <strong>{telemetry.networkRxKb} KB</strong>
+      </div>
+      <div className="metric-row">
+        <span>Net TX</span>
+        <strong>{telemetry.networkTxKb} KB</strong>
+      </div>
       <div className="process-list">
         {telemetry.topProcesses.slice(0, 6).map((proc) => (
           <div key={proc.pid} className="process-item">
