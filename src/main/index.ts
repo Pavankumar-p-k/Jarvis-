@@ -1,9 +1,19 @@
 import { app, BrowserWindow } from "electron";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { JarvisRuntime } from "./core/jarvis-runtime";
 import { registerIpcHandlers } from "./ipc/register-ipc";
 
 const isDev = Boolean(process.env.JARVIS_DEV_SERVER_URL);
+
+if (isDev) {
+  const devUserData = process.env.JARVIS_DEV_USER_DATA_DIR ?? join(process.cwd(), ".jarvis-dev-user-data");
+  const devSessionData = join(devUserData, "session");
+  mkdirSync(devSessionData, { recursive: true });
+  app.setPath("userData", devUserData);
+  app.setPath("sessionData", devSessionData);
+  app.commandLine.appendSwitch("disk-cache-dir", join(devSessionData, "cache"));
+}
 
 const createWindow = async (): Promise<void> => {
   const runtime = new JarvisRuntime({

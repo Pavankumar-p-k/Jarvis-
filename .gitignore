@@ -10,3 +10,4 @@ logs/
 *.local
 *.tgz
 data/runtime/
+.jarvis-dev-user-data/
