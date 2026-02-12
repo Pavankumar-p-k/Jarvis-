@@ -94,3 +94,4 @@ Each plugin folder includes `manifest.json`:
 
 - Data is persisted locally in Electron user data (`data/state.json`).
 - If local LLM is unavailable, Jarvis gracefully falls back to rules-based intent handling.
+- Beginner-friendly documentation: `docs/EASY_GUIDE.md`.
