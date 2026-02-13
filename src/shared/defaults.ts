@@ -24,6 +24,7 @@ export const buildDefaultState = (): AssistantState => ({
   reminders: [],
   alarms: [],
   routines: [],
+  customCommands: [],
   memory: buildDefaultMemory(),
   suggestions: [],
   commandHistory: [],

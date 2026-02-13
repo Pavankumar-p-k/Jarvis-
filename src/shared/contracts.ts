@@ -13,7 +13,11 @@ export type IntentType =
   | "run_routine"
   | "list_reminders"
   | "system_info"
+  | "custom_command"
+  | "plugin_command"
   | "unknown";
+
+export type VoiceBackend = "whisper-node-addon" | "whisper.cpp-cli" | "stub";
 
 export interface TelemetrySnapshot {
   cpuPercent: number;
@@ -62,6 +66,32 @@ export interface RoutineItem {
   steps: RoutineStep[];
   createdAtIso: string;
   lastRunAtIso?: string;
+}
+
+export interface CustomCommand {
+  id: string;
+  name: string;
+  trigger: string;
+  action: string;
+  passThroughArgs: boolean;
+  enabled: boolean;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface CreateCustomCommandInput {
+  name: string;
+  trigger: string;
+  action: string;
+  passThroughArgs?: boolean;
+}
+
+export interface UpdateCustomCommandInput {
+  name?: string;
+  trigger?: string;
+  action?: string;
+  passThroughArgs?: boolean;
+  enabled?: boolean;
 }
 
 export interface MemoryProfile {
@@ -119,6 +149,7 @@ export interface PluginManifest {
   version: string;
   description: string;
   entryCommand: string;
+  entry?: string;
   permissionLevel: PermissionLevel;
 }
 
@@ -154,12 +185,33 @@ export interface ActionResult {
   needsConfirmation?: boolean;
 }
 
+export interface VoiceStatus {
+  enabled: boolean;
+  listening: boolean;
+  wakeWord: string;
+  backend: VoiceBackend;
+  pendingAudioChunks: number;
+  lastWakeAtIso?: string;
+  lastTranscript?: string;
+  lastError?: string;
+}
+
+export interface VoiceEvent {
+  type: "status" | "wake" | "command" | "error";
+  atIso: string;
+  status?: VoiceStatus;
+  transcript?: string;
+  command?: string;
+  message?: string;
+}
+
 export interface AssistantState {
   mode: MissionMode;
   telemetry: TelemetrySnapshot;
   reminders: ReminderItem[];
   alarms: AlarmItem[];
   routines: RoutineItem[];
+  customCommands: CustomCommand[];
   memory: MemoryProfile;
   suggestions: SuggestionItem[];
   commandHistory: CommandRecord[];
@@ -183,6 +235,14 @@ export interface JarvisApi {
   setAutomationEnabled: (id: string, enabled: boolean) => Promise<AssistantState>;
   setPluginEnabled: (pluginId: string, enabled: boolean) => Promise<AssistantState>;
   terminateProcess: (pid: number, bypassConfirmation?: boolean) => Promise<CommandResponse>;
+  createCustomCommand: (input: CreateCustomCommandInput) => Promise<AssistantState>;
+  updateCustomCommand: (id: string, updates: UpdateCustomCommandInput) => Promise<AssistantState>;
+  deleteCustomCommand: (id: string) => Promise<AssistantState>;
+  getVoiceStatus: () => Promise<VoiceStatus>;
+  setVoiceEnabled: (enabled: boolean) => Promise<VoiceStatus>;
+  pushVoiceAudio: (base64Audio: string, mimeType?: string) => Promise<VoiceStatus>;
+  simulateVoiceTranscript: (transcript: string) => Promise<VoiceStatus>;
+  onVoiceEvent: (listener: (event: VoiceEvent) => void) => () => void;
 }
 
 export const IPC_CHANNELS = {
@@ -195,5 +255,13 @@ export const IPC_CHANNELS = {
   reloadPlugins: "jarvis:reload-plugins",
   setAutomationEnabled: "jarvis:set-automation-enabled",
   setPluginEnabled: "jarvis:set-plugin-enabled",
-  terminateProcess: "jarvis:terminate-process"
+  terminateProcess: "jarvis:terminate-process",
+  createCustomCommand: "jarvis:create-custom-command",
+  updateCustomCommand: "jarvis:update-custom-command",
+  deleteCustomCommand: "jarvis:delete-custom-command",
+  getVoiceStatus: "jarvis:get-voice-status",
+  setVoiceEnabled: "jarvis:set-voice-enabled",
+  pushVoiceAudio: "jarvis:push-voice-audio",
+  simulateVoiceTranscript: "jarvis:simulate-voice-transcript",
+  voiceEvent: "jarvis:voice-event"
 } as const;

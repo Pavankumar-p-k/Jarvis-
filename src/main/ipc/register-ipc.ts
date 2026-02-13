@@ -1,40 +1,90 @@
 import { ipcMain } from "electron";
 import { IPC_CHANNELS, type MissionMode } from "../../shared/contracts";
-import { commandSchema } from "../../shared/schemas";
+import {
+  commandSchema,
+  customCommandCreateSchema,
+  customCommandUpdateSchema,
+  voiceAudioSchema,
+  voiceEnabledSchema,
+  voiceTranscriptSchema
+} from "../../shared/schemas";
 import { JarvisRuntime } from "../core/jarvis-runtime";
+import { VoiceService } from "../core/voice-service";
 
-export const registerIpcHandlers = (runtime: JarvisRuntime): void => {
-  ipcMain.handle(IPC_CHANNELS.getState, async () => runtime.getState());
+const replaceHandler = (
+  channel: string,
+  handler: Parameters<typeof ipcMain.handle>[1]
+): void => {
+  ipcMain.removeHandler(channel);
+  ipcMain.handle(channel, handler);
+};
 
-  ipcMain.handle(IPC_CHANNELS.runCommand, async (_event, command: string, bypassConfirmation?: boolean) => {
+export const registerIpcHandlers = (runtime: JarvisRuntime, voiceService: VoiceService): void => {
+  replaceHandler(IPC_CHANNELS.getState, async () => runtime.getState());
+
+  replaceHandler(IPC_CHANNELS.runCommand, async (_event, command: string, bypassConfirmation?: boolean) => {
     const input = commandSchema.parse(command);
     return runtime.runCommand(input, Boolean(bypassConfirmation));
   });
 
-  ipcMain.handle(IPC_CHANNELS.setMode, async (_event, mode: MissionMode) => {
+  replaceHandler(IPC_CHANNELS.setMode, async (_event, mode: MissionMode) => {
     return runtime.setMode(mode);
   });
 
-  ipcMain.handle(IPC_CHANNELS.completeReminder, async (_event, id: string) => {
+  replaceHandler(IPC_CHANNELS.completeReminder, async (_event, id: string) => {
     return runtime.completeReminder(id);
   });
 
-  ipcMain.handle(IPC_CHANNELS.replayCommand, async (_event, id: string) => {
+  replaceHandler(IPC_CHANNELS.replayCommand, async (_event, id: string) => {
     return runtime.replayCommand(id);
   });
 
-  ipcMain.handle(IPC_CHANNELS.generateBriefing, async () => runtime.generateBriefing());
-  ipcMain.handle(IPC_CHANNELS.reloadPlugins, async () => runtime.reloadPlugins());
-  ipcMain.handle(IPC_CHANNELS.setAutomationEnabled, async (_event, id: string, enabled: boolean) => {
+  replaceHandler(IPC_CHANNELS.generateBriefing, async () => runtime.generateBriefing());
+  replaceHandler(IPC_CHANNELS.reloadPlugins, async () => runtime.reloadPlugins());
+
+  replaceHandler(IPC_CHANNELS.setAutomationEnabled, async (_event, id: string, enabled: boolean) => {
     return runtime.setAutomationEnabled(id, Boolean(enabled));
   });
-  ipcMain.handle(IPC_CHANNELS.setPluginEnabled, async (_event, pluginId: string, enabled: boolean) => {
+
+  replaceHandler(IPC_CHANNELS.setPluginEnabled, async (_event, pluginId: string, enabled: boolean) => {
     return runtime.setPluginEnabled(pluginId, Boolean(enabled));
   });
-  ipcMain.handle(
+
+  replaceHandler(
     IPC_CHANNELS.terminateProcess,
     async (_event, pid: number, bypassConfirmation?: boolean) => {
       return runtime.terminateProcess(Number(pid), Boolean(bypassConfirmation));
     }
   );
+
+  replaceHandler(IPC_CHANNELS.createCustomCommand, async (_event, input: unknown) => {
+    const payload = customCommandCreateSchema.parse(input);
+    return runtime.createCustomCommand(payload);
+  });
+
+  replaceHandler(IPC_CHANNELS.updateCustomCommand, async (_event, id: string, updates: unknown) => {
+    const payload = customCommandUpdateSchema.parse(updates);
+    return runtime.updateCustomCommand(id, payload);
+  });
+
+  replaceHandler(IPC_CHANNELS.deleteCustomCommand, async (_event, id: string) => {
+    return runtime.deleteCustomCommand(id);
+  });
+
+  replaceHandler(IPC_CHANNELS.getVoiceStatus, async () => voiceService.getStatus());
+
+  replaceHandler(IPC_CHANNELS.setVoiceEnabled, async (_event, enabled: boolean) => {
+    const payload = voiceEnabledSchema.parse(Boolean(enabled));
+    return voiceService.setEnabled(payload);
+  });
+
+  replaceHandler(IPC_CHANNELS.pushVoiceAudio, async (_event, base64Audio: string, mimeType?: string) => {
+    const payload = voiceAudioSchema.parse({ base64Audio, mimeType });
+    return voiceService.pushAudio(payload.base64Audio, payload.mimeType ?? "audio/webm");
+  });
+
+  replaceHandler(IPC_CHANNELS.simulateVoiceTranscript, async (_event, transcript: string) => {
+    const payload = voiceTranscriptSchema.parse(transcript);
+    return voiceService.simulateTranscript(payload);
+  });
 };

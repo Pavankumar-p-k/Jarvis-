@@ -1,4 +1,4 @@
-import { exec, execSync, spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import type {
   ActionResult,
@@ -6,12 +6,15 @@ import type {
   AssistantState,
   CommandRecord,
   CommandResponse,
+  CreateCustomCommandInput,
+  CustomCommand,
   MissionMode,
   MorningBriefing,
   PermissionLevel,
   ReminderItem,
   RoutineItem,
-  SuggestionItem
+  SuggestionItem,
+  UpdateCustomCommandInput
 } from "../../shared/contracts";
 import { buildDefaultState } from "../../shared/defaults";
 import { createId } from "../../shared/id";
@@ -32,7 +35,23 @@ interface RuntimeOptions {
   pluginsDir: string;
 }
 
+interface AppLaunchSpec {
+  file: string;
+  args: string[];
+}
+
+interface CustomCommandMatch {
+  command: CustomCommand;
+  args: string;
+}
+
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+const normalizeSpaces = (value: string): string => value.trim().replace(/\s+/g, " ");
+
+const normalizeTrigger = (value: string): string => normalizeSpaces(value).toLowerCase();
+
+const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const defaultRoutines = (): RoutineItem[] => [
   {
@@ -80,14 +99,14 @@ const defaultAutomations = () => [
   }
 ];
 
-const appCommandMap: Record<string, string> = {
-  chrome: "start chrome",
-  vscode: "start code",
-  spotify: "start spotify",
-  notepad: "start notepad",
-  calc: "start calc",
-  terminal: "start powershell",
-  steam: "start steam"
+const appLaunchMap: Record<string, AppLaunchSpec> = {
+  chrome: { file: "cmd", args: ["/c", "start", "", "chrome"] },
+  vscode: { file: "cmd", args: ["/c", "start", "", "code"] },
+  spotify: { file: "cmd", args: ["/c", "start", "", "spotify"] },
+  notepad: { file: "cmd", args: ["/c", "start", "", "notepad"] },
+  calc: { file: "cmd", args: ["/c", "start", "", "calc"] },
+  terminal: { file: "cmd", args: ["/c", "start", "", "powershell"] },
+  steam: { file: "cmd", args: ["/c", "start", "", "steam"] }
 };
 
 export class JarvisRuntime {
@@ -112,12 +131,17 @@ export class JarvisRuntime {
   async init(): Promise<void> {
     const loaded = this.stateStore.read(buildDefaultState());
     this.state = loaded;
-    if (this.state.routines.length === 0) {
+
+    if (!Array.isArray(this.state.routines) || this.state.routines.length === 0) {
       this.state.routines = defaultRoutines();
     }
-    if (this.state.automations.length === 0) {
+    if (!Array.isArray(this.state.automations) || this.state.automations.length === 0) {
       this.state.automations = defaultAutomations();
     }
+    if (!Array.isArray(this.state.customCommands)) {
+      this.state.customCommands = [];
+    }
+
     this.state.plugins = this.loadPluginsWithState(this.state.plugins);
     this.refreshTelemetry();
     this.saveState();
@@ -142,6 +166,94 @@ export class JarvisRuntime {
     this.state.memory.lastMode = mode;
     this.state.memory.updatedAtIso = new Date().toISOString();
     this.pushSuggestion(`Mode switched to ${mode}`, "Mission control");
+    this.saveState();
+    return this.getState();
+  }
+
+  async createCustomCommand(input: CreateCustomCommandInput): Promise<AssistantState> {
+    const name = normalizeSpaces(input.name);
+    const trigger = normalizeTrigger(input.trigger);
+    const action = normalizeSpaces(input.action);
+
+    if (this.hasCustomCommandConflict(name, trigger)) {
+      throw new Error("Custom command name or trigger already exists.");
+    }
+
+    const nowIso = new Date().toISOString();
+    const created: CustomCommand = {
+      id: createId("cc"),
+      name,
+      trigger,
+      action,
+      passThroughArgs: Boolean(input.passThroughArgs),
+      enabled: true,
+      createdAtIso: nowIso,
+      updatedAtIso: nowIso
+    };
+
+    this.state.customCommands.unshift(created);
+    this.pushSuggestion(`Custom command created: ${created.name}`, "Command builder");
+    this.recordCommand(
+      `custom command create ${created.name}`,
+      "custom_command",
+      { ok: true, message: `Custom command "${created.name}" created.` },
+      true
+    );
+    this.saveState();
+    return this.getState();
+  }
+
+  async updateCustomCommand(id: string, updates: UpdateCustomCommandInput): Promise<AssistantState> {
+    const target = this.state.customCommands.find((item) => item.id === id);
+    if (!target) {
+      throw new Error("Custom command not found.");
+    }
+
+    const nextName = updates.name !== undefined ? normalizeSpaces(updates.name) : target.name;
+    const nextTrigger = updates.trigger !== undefined ? normalizeTrigger(updates.trigger) : target.trigger;
+    const nextAction = updates.action !== undefined ? normalizeSpaces(updates.action) : target.action;
+
+    if (this.hasCustomCommandConflict(nextName, nextTrigger, id)) {
+      throw new Error("Another custom command already uses that name or trigger.");
+    }
+
+    target.name = nextName;
+    target.trigger = nextTrigger;
+    target.action = nextAction;
+    if (updates.passThroughArgs !== undefined) {
+      target.passThroughArgs = updates.passThroughArgs;
+    }
+    if (updates.enabled !== undefined) {
+      target.enabled = updates.enabled;
+    }
+    target.updatedAtIso = new Date().toISOString();
+
+    this.pushSuggestion(`Custom command updated: ${target.name}`, "Command builder");
+    this.recordCommand(
+      `custom command update ${target.name}`,
+      "custom_command",
+      { ok: true, message: `Custom command "${target.name}" updated.` },
+      true
+    );
+    this.saveState();
+    return this.getState();
+  }
+
+  async deleteCustomCommand(id: string): Promise<AssistantState> {
+    const index = this.state.customCommands.findIndex((item) => item.id === id);
+    if (index < 0) {
+      throw new Error("Custom command not found.");
+    }
+
+    const removed = this.state.customCommands[index];
+    this.state.customCommands.splice(index, 1);
+    this.pushSuggestion(`Custom command removed: ${removed.name}`, "Command builder");
+    this.recordCommand(
+      `custom command delete ${removed.name}`,
+      "custom_command",
+      { ok: true, message: `Custom command "${removed.name}" deleted.` },
+      true
+    );
     this.saveState();
     return this.getState();
   }
@@ -245,9 +357,9 @@ export class JarvisRuntime {
     depth: number,
     writeHistory: boolean
   ): Promise<CommandResponse> {
-    if (depth > 2) {
+    if (depth > 4) {
       return {
-        result: { ok: false, message: "Automation recursion blocked." },
+        result: { ok: false, message: "Command recursion blocked." },
         state: this.getState()
       };
     }
@@ -259,11 +371,17 @@ export class JarvisRuntime {
         state: this.getState()
       };
     }
-    const normalized = command.data;
+
+    const normalized = normalizeSpaces(command.data);
+
+    const customMatch = this.findCustomCommandMatch(normalized);
+    if (customMatch) {
+      return this.executeCustomCommand(normalized, customMatch, bypassConfirmation, depth, writeHistory);
+    }
 
     const plugin = this.pluginService.findByCommand(normalized, this.state.plugins);
     if (plugin) {
-      return this.executePluginCommand(normalized, plugin.manifest.permissionLevel, bypassConfirmation);
+      return this.executePluginCommand(plugin, normalized, plugin.manifest.permissionLevel, bypassConfirmation, writeHistory);
     }
 
     const lower = normalized.toLowerCase();
@@ -327,10 +445,52 @@ export class JarvisRuntime {
     return { result, state: this.getState() };
   }
 
+  private async executeCustomCommand(
+    sourceCommand: string,
+    customMatch: CustomCommandMatch,
+    bypassConfirmation: boolean,
+    depth: number,
+    writeHistory: boolean
+  ): Promise<CommandResponse> {
+    const targetCommand = this.buildCustomTarget(customMatch.command, customMatch.args);
+
+    if (!targetCommand) {
+      const result: ActionResult = { ok: false, message: "Custom command action is empty." };
+      this.recordCommand(sourceCommand, "custom_command", result, writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
+    if (targetCommand.toLowerCase() === sourceCommand.toLowerCase()) {
+      const result: ActionResult = { ok: false, message: "Custom command points to itself." };
+      this.recordCommand(sourceCommand, "custom_command", result, writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
+    const delegated = await this.executeCommand(targetCommand, bypassConfirmation, depth + 1, false);
+    const result: ActionResult = {
+      ok: delegated.result.ok,
+      message: delegated.result.ok
+        ? `Custom command "${customMatch.command.name}" executed.`
+        : `Custom command "${customMatch.command.name}" failed: ${delegated.result.message}`,
+      data: {
+        delegatedCommand: targetCommand,
+        delegatedResult: delegated.result.message
+      }
+    };
+
+    this.recordCommand(sourceCommand, "custom_command", result, writeHistory);
+    this.saveState();
+    return { result, state: this.getState() };
+  }
+
   private async executePluginCommand(
+    pluginState: AssistantState["plugins"][number],
     command: string,
     permission: PermissionLevel,
-    bypassConfirmation: boolean
+    bypassConfirmation: boolean,
+    writeHistory: boolean
   ): Promise<CommandResponse> {
     if (this.guard.needsConfirmation(permission, bypassConfirmation)) {
       return {
@@ -343,11 +503,8 @@ export class JarvisRuntime {
       };
     }
 
-    const result: ActionResult = {
-      ok: true,
-      message: `Plugin handled command: ${command}`
-    };
-    this.recordCommand(command, "unknown", result, true);
+    const result = await this.pluginService.executeCommand(pluginState, command, this.getState());
+    this.recordCommand(command, "plugin_command", result, writeHistory);
     this.saveState();
     return { result, state: this.getState() };
   }
@@ -422,17 +579,52 @@ export class JarvisRuntime {
     if (!app) {
       return { ok: false, message: "App name missing." };
     }
+
     if (app.startsWith("http://") || app.startsWith("https://")) {
-      exec(`start ${app}`, { windowsHide: true });
-      return { ok: true, message: `Opening URL ${app}` };
+      return this.openExternalUrl(app);
     }
-    const command = appCommandMap[app];
-    if (!command) {
+
+    const launchSpec = appLaunchMap[app];
+    if (!launchSpec) {
       return { ok: false, message: `App "${app}" not in launcher map.` };
     }
-    spawn("cmd", ["/c", command], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-    this.bumpPreferredApp(app);
-    return { ok: true, message: `Launching ${app}` };
+
+    try {
+      spawn(launchSpec.file, launchSpec.args, {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }).unref();
+      this.bumpPreferredApp(app);
+      return { ok: true, message: `Launching ${app}` };
+    } catch {
+      return { ok: false, message: `Unable to launch ${app}.` };
+    }
+  }
+
+  private openExternalUrl(rawUrl: string): ActionResult {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return { ok: false, message: "Invalid URL." };
+    }
+
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { ok: false, message: "Only http/https URLs are allowed." };
+    }
+
+    try {
+      spawn("cmd", ["/c", "start", "", parsed.toString()], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }).unref();
+      return { ok: true, message: `Opening URL ${parsed.toString()}` };
+    } catch {
+      return { ok: false, message: "Failed to open URL." };
+    }
   }
 
   private sendMediaPlayPause(successMessage: string): ActionResult {
@@ -589,6 +781,62 @@ export class JarvisRuntime {
         enabled: found.enabled,
         installedAtIso: found.installedAtIso
       };
+    });
+  }
+
+  private findCustomCommandMatch(rawCommand: string): CustomCommandMatch | undefined {
+    const commandText = normalizeSpaces(rawCommand);
+    const lower = commandText.toLowerCase();
+
+    const enabledCommands = this.state.customCommands
+      .filter((item) => item.enabled)
+      .sort((a, b) => normalizeTrigger(b.trigger).length - normalizeTrigger(a.trigger).length);
+
+    for (const item of enabledCommands) {
+      const trigger = normalizeTrigger(item.trigger);
+      const name = item.name.trim().toLowerCase();
+
+      if (lower === trigger || lower === name) {
+        return { command: item, args: "" };
+      }
+
+      const match = lower.match(new RegExp(`^${escapeRegex(trigger)}\\s+(.+)$`, "i"));
+      if (match) {
+        const args = normalizeSpaces(match[1] ?? "");
+        return { command: item, args };
+      }
+    }
+
+    return undefined;
+  }
+
+  private buildCustomTarget(command: CustomCommand, args: string): string {
+    const action = command.action.trim();
+    if (!action) {
+      return "";
+    }
+
+    if (action.includes("{args}")) {
+      return normalizeSpaces(action.replace("{args}", args));
+    }
+
+    if (command.passThroughArgs && args) {
+      return normalizeSpaces(`${action} ${args}`);
+    }
+
+    return action;
+  }
+
+  private hasCustomCommandConflict(name: string, trigger: string, currentId?: string): boolean {
+    const normalizedName = name.trim().toLowerCase();
+    const normalizedTrigger = normalizeTrigger(trigger);
+
+    return this.state.customCommands.some((item) => {
+      if (currentId && item.id === currentId) {
+        return false;
+      }
+
+      return item.name.trim().toLowerCase() === normalizedName || normalizeTrigger(item.trigger) === normalizedTrigger;
     });
   }
 }

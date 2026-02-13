@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "description": "Adds quick launcher shortcuts for desktop workflows.",
   "entryCommand": "/launch",
+  "entry": "index.js",
   "permissionLevel": "confirm"
 }

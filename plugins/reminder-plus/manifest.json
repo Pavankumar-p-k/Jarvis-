@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "description": "Provides reminder templating and quick checklist command hooks.",
   "entryCommand": "/remindplus",
+  "entry": "index.js",
   "permissionLevel": "safe"
 }

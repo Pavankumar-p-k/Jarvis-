@@ -1,7 +1,10 @@
 import { app, BrowserWindow } from "electron";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { VoiceEvent } from "../shared/contracts";
+import { IPC_CHANNELS } from "../shared/contracts";
 import { JarvisRuntime } from "./core/jarvis-runtime";
+import { VoiceService } from "./core/voice-service";
 import { registerIpcHandlers } from "./ipc/register-ipc";
 
 const isDev = Boolean(process.env.JARVIS_DEV_SERVER_URL);
@@ -22,8 +25,6 @@ const createWindow = async (): Promise<void> => {
   });
   await runtime.init();
 
-  registerIpcHandlers(runtime);
-
   const win = new BrowserWindow({
     width: 1560,
     height: 980,
@@ -40,6 +41,27 @@ const createWindow = async (): Promise<void> => {
     }
   });
 
+  const sendVoiceEvent = (event: VoiceEvent): void => {
+    if (win.isDestroyed()) {
+      return;
+    }
+    win.webContents.send(IPC_CHANNELS.voiceEvent, event);
+  };
+
+  const voiceService = new VoiceService({
+    wakeWord: process.env.JARVIS_WAKE_WORD ?? "jarvis",
+    onCommand: async (command) => {
+      const response = await runtime.runCommand(command);
+      return response.result.message;
+    },
+    onEvent: sendVoiceEvent,
+    whisperCliPath: process.env.JARVIS_WHISPER_CPP,
+    whisperModelPath: process.env.JARVIS_WHISPER_MODEL
+  });
+  await voiceService.init();
+
+  registerIpcHandlers(runtime, voiceService);
+
   if (isDev) {
     await win.loadURL(process.env.JARVIS_DEV_SERVER_URL as string);
   } else {
@@ -47,6 +69,7 @@ const createWindow = async (): Promise<void> => {
   }
 
   win.on("closed", () => {
+    voiceService.destroy();
     runtime.destroy();
   });
 };
