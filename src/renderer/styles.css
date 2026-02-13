@@ -455,6 +455,32 @@ button:disabled {
   transition: transform 120ms linear;
 }
 
+.voice-orb.state-listening .orb-core {
+  box-shadow:
+    0 0 38px rgba(104, 236, 255, 0.65),
+    inset 0 0 18px rgba(180, 255, 246, 0.5);
+}
+
+.voice-orb.state-transcribing .orb-core {
+  box-shadow:
+    0 0 42px rgba(255, 226, 137, 0.72),
+    inset 0 0 20px rgba(255, 236, 164, 0.45);
+}
+
+.voice-orb.state-transcribing .orb-wave {
+  border-color: rgba(238, 211, 118, 0.45);
+}
+
+.voice-orb.state-failed .orb-core {
+  box-shadow:
+    0 0 34px rgba(248, 126, 126, 0.68),
+    inset 0 0 16px rgba(255, 163, 163, 0.42);
+}
+
+.voice-orb.state-failed .orb-wave {
+  border-color: rgba(245, 130, 130, 0.48);
+}
+
 .orb-core {
   position: absolute;
   width: 76px;

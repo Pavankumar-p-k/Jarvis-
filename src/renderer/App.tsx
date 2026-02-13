@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   AgentType,
   AssistantState,
+  CommandFeedbackEvent,
   CreateCustomCommandInput,
   MissionMode,
   MorningBriefing,
@@ -11,7 +12,7 @@ import type {
 } from "../shared/contracts";
 import { AgentTabs } from "./components/AgentTabs";
 import { AutomationBoard } from "./components/AutomationBoard";
-import { CustomCommandPanel } from "./components/CustomCommandPanel";
+import { CustomCommandsPanel } from "./components/CustomCommandsPanel";
 import { HudBackground } from "./components/HudBackground";
 import { MissionModes } from "./components/MissionModes";
 import { PlannerPanel } from "./components/PlannerPanel";
@@ -100,6 +101,18 @@ export const App = (): JSX.Element => {
     setBootError(null);
   };
 
+  const mergeCustomCommands = (commands: AssistantState["customCommands"]): void => {
+    setState((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        customCommands: commands
+      };
+    });
+  };
+
   useEffect(() => {
     let active = true;
     const sync = async (): Promise<void> => {
@@ -132,7 +145,8 @@ export const App = (): JSX.Element => {
 
   useEffect(() => {
     let mounted = true;
-    let unsubscribe: () => void = () => {};
+    let unsubscribeVoice: () => void = () => {};
+    let unsubscribeFeedback: () => void = () => {};
 
     const handleVoiceEvent = (event: VoiceEvent): void => {
       if (!mounted) {
@@ -144,15 +158,20 @@ export const App = (): JSX.Element => {
       if (event.type === "wake") {
         setResultMessage("Wake word detected. Listening for a command.");
       }
-      if (event.type === "command" && event.command) {
-        setResultMessage(`Voice command: ${event.command}`);
-      }
       if (event.type === "error" && event.message) {
         setResultMessage(event.message);
       }
     };
 
-    const initVoice = async (): Promise<void> => {
+    const handleCommandFeedback = (event: CommandFeedbackEvent): void => {
+      if (!mounted) {
+        return;
+      }
+      setResultMessage(`[${event.source}] ${event.result.message}`);
+      void refreshState();
+    };
+
+    const initRealtime = async (): Promise<void> => {
       try {
         const status = await window.jarvisApi.getVoiceStatus();
         if (mounted) {
@@ -163,15 +182,20 @@ export const App = (): JSX.Element => {
       }
 
       if (typeof window.jarvisApi?.onVoiceEvent === "function") {
-        unsubscribe = window.jarvisApi.onVoiceEvent(handleVoiceEvent);
+        unsubscribeVoice = window.jarvisApi.onVoiceEvent(handleVoiceEvent);
+      }
+
+      if (typeof window.jarvisApi?.onCommandFeedback === "function") {
+        unsubscribeFeedback = window.jarvisApi.onCommandFeedback(handleCommandFeedback);
       }
     };
 
-    void initVoice();
+    void initRealtime();
 
     return () => {
       mounted = false;
-      unsubscribe();
+      unsubscribeVoice();
+      unsubscribeFeedback();
     };
   }, []);
 
@@ -201,6 +225,12 @@ export const App = (): JSX.Element => {
     }
   };
 
+  const handleRefreshCustomCommands = async (): Promise<void> => {
+    const commands = await window.jarvisApi.listCustomCommands();
+    mergeCustomCommands(commands);
+    setResultMessage("Custom command list refreshed.");
+  };
+
   const handleCreateCustomCommand = async (input: CreateCustomCommandInput): Promise<void> => {
     const updated = await window.jarvisApi.createCustomCommand(input);
     setState(updated);
@@ -227,6 +257,13 @@ export const App = (): JSX.Element => {
     setState(updated);
     setResultMessage("Custom command deleted.");
     playCue(320, 0.06);
+  };
+
+  const handleTestRunCustomCommand = async (name: string): Promise<void> => {
+    const response = await window.jarvisApi.runCustomCommandByName(name, true);
+    setState(response.state);
+    setResultMessage(response.result.message);
+    playCue(response.result.ok ? 740 : 210, 0.05);
   };
 
   const terminalLines = useMemo<TerminalLine[]>(() => {
@@ -405,7 +442,7 @@ export const App = (): JSX.Element => {
                   {voiceStatus?.enabled ? "Disable" : "Enable"}
                 </button>
               </header>
-              <VoiceOrb level={micLevel} mode={state.mode} />
+              <VoiceOrb level={micLevel} mode={state.mode} voiceStatus={voiceStatus ?? undefined} />
               <div className="voice-status-grid">
                 <small>Wake word: {voiceStatus?.wakeWord ?? "jarvis"}</small>
                 <small>Backend: {voiceStatus?.backend ?? "stub"}</small>
@@ -500,14 +537,13 @@ export const App = (): JSX.Element => {
                 playCue(enabled ? 730 : 320, 0.05);
               }}
             />
-            <CustomCommandPanel
+            <CustomCommandsPanel
               commands={state.customCommands}
               onCreate={handleCreateCustomCommand}
               onUpdate={handleUpdateCustomCommand}
               onDelete={handleDeleteCustomCommand}
-              onRun={(trigger) => {
-                void runCommand(trigger);
-              }}
+              onTestRun={handleTestRunCustomCommand}
+              onRefresh={handleRefreshCustomCommands}
             />
             <PluginStore
               plugins={state.plugins}

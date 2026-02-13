@@ -19,6 +19,8 @@ export type IntentType =
 
 export type VoiceBackend = "whisper-node-addon" | "whisper.cpp-cli" | "stub";
 
+export type CommandFeedbackSource = "user" | "voice" | "custom" | "plugin" | "system";
+
 export interface TelemetrySnapshot {
   cpuPercent: number;
   memoryUsedMb: number;
@@ -185,6 +187,14 @@ export interface ActionResult {
   needsConfirmation?: boolean;
 }
 
+export interface CommandFeedbackEvent {
+  id: string;
+  atIso: string;
+  command: string;
+  source: CommandFeedbackSource;
+  result: ActionResult;
+}
+
 export interface VoiceStatus {
   enabled: boolean;
   listening: boolean;
@@ -238,11 +248,14 @@ export interface JarvisApi {
   createCustomCommand: (input: CreateCustomCommandInput) => Promise<AssistantState>;
   updateCustomCommand: (id: string, updates: UpdateCustomCommandInput) => Promise<AssistantState>;
   deleteCustomCommand: (id: string) => Promise<AssistantState>;
+  listCustomCommands: () => Promise<CustomCommand[]>;
+  runCustomCommandByName: (name: string, bypassConfirmation?: boolean) => Promise<CommandResponse>;
   getVoiceStatus: () => Promise<VoiceStatus>;
   setVoiceEnabled: (enabled: boolean) => Promise<VoiceStatus>;
   pushVoiceAudio: (base64Audio: string, mimeType?: string) => Promise<VoiceStatus>;
   simulateVoiceTranscript: (transcript: string) => Promise<VoiceStatus>;
   onVoiceEvent: (listener: (event: VoiceEvent) => void) => () => void;
+  onCommandFeedback: (listener: (event: CommandFeedbackEvent) => void) => () => void;
 }
 
 export const IPC_CHANNELS = {
@@ -259,9 +272,12 @@ export const IPC_CHANNELS = {
   createCustomCommand: "jarvis:create-custom-command",
   updateCustomCommand: "jarvis:update-custom-command",
   deleteCustomCommand: "jarvis:delete-custom-command",
+  listCustomCommands: "jarvis:list-custom-commands",
+  runCustomCommandByName: "jarvis:run-custom-command-by-name",
   getVoiceStatus: "jarvis:get-voice-status",
   setVoiceEnabled: "jarvis:set-voice-enabled",
   pushVoiceAudio: "jarvis:push-voice-audio",
   simulateVoiceTranscript: "jarvis:simulate-voice-transcript",
-  voiceEvent: "jarvis:voice-event"
+  voiceEvent: "jarvis:voice-event",
+  commandFeedback: "jarvis:command-feedback"
 } as const;

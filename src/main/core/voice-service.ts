@@ -30,6 +30,13 @@ interface TempAudio {
   outputBasePath: string;
 }
 
+interface WavMeta {
+  audioFormat: number;
+  bitsPerSample: number;
+  dataOffset: number;
+  dataSize: number;
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
@@ -69,6 +76,86 @@ const pickResultText = (value: unknown): string | null => {
   return null;
 };
 
+const parseWavMeta = (buffer: Buffer): WavMeta | null => {
+  if (buffer.length < 44) {
+    return null;
+  }
+
+  if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
+    return null;
+  }
+
+  let offset = 12;
+  let audioFormat = 1;
+  let bitsPerSample = 16;
+  let dataOffset = -1;
+  let dataSize = 0;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString("ascii", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    offset += 8;
+
+    if (offset + chunkSize > buffer.length) {
+      break;
+    }
+
+    if (chunkId === "fmt ") {
+      if (chunkSize < 16) {
+        return null;
+      }
+      audioFormat = buffer.readUInt16LE(offset);
+      bitsPerSample = buffer.readUInt16LE(offset + 14);
+    }
+
+    if (chunkId === "data") {
+      dataOffset = offset;
+      dataSize = chunkSize;
+      break;
+    }
+
+    offset += chunkSize;
+    if (chunkSize % 2 === 1) {
+      offset += 1;
+    }
+  }
+
+  if (dataOffset < 0 || dataSize <= 0) {
+    return null;
+  }
+
+  return {
+    audioFormat,
+    bitsPerSample,
+    dataOffset,
+    dataSize: Math.min(dataSize, buffer.length - dataOffset)
+  };
+};
+
+const rmsFromPcm16Wav = (buffer: Buffer): number | null => {
+  const meta = parseWavMeta(buffer);
+  if (!meta || meta.audioFormat !== 1 || meta.bitsPerSample !== 16) {
+    return null;
+  }
+
+  const sampleCount = Math.floor(meta.dataSize / 2);
+  if (sampleCount <= 0) {
+    return null;
+  }
+
+  let sumSquares = 0;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const raw = buffer.readInt16LE(meta.dataOffset + index * 2);
+    const normalized = raw / 32768;
+    sumSquares += normalized * normalized;
+  }
+
+  return Math.sqrt(sumSquares / sampleCount);
+};
+
+/**
+ * Offline voice orchestration service using local wake-onset gating and local STT backends.
+ */
 export class VoiceService {
   private readonly logger = new Logger();
   private readonly wakeWord: string;
@@ -77,10 +164,17 @@ export class VoiceService {
   private readonly whisperCliPath?: string;
   private readonly whisperModelPath?: string;
 
+  private readonly wakeRmsThreshold: number;
+  private readonly wakeRequiredHits: number;
+  private readonly wakeCooldownMs: number;
+  private readonly commandWindowMs: number;
+
   private enabled = false;
   private processing = false;
   private commandWindowUntil = 0;
   private chunkQueue: AudioChunk[] = [];
+  private wakeHits = 0;
+  private lastWakeAtMs = 0;
 
   private status: VoiceStatus;
   private backend: VoiceBackend = "stub";
@@ -93,6 +187,11 @@ export class VoiceService {
     this.whisperCliPath = options.whisperCliPath ?? process.env.JARVIS_WHISPER_CPP;
     this.whisperModelPath = options.whisperModelPath ?? process.env.JARVIS_WHISPER_MODEL;
 
+    this.wakeRmsThreshold = Number(process.env.JARVIS_WAKE_RMS ?? "0.045");
+    this.wakeRequiredHits = Math.max(1, Number(process.env.JARVIS_WAKE_HITS ?? "2"));
+    this.wakeCooldownMs = Math.max(500, Number(process.env.JARVIS_WAKE_COOLDOWN_MS ?? "3500"));
+    this.commandWindowMs = Math.max(1500, Number(process.env.JARVIS_COMMAND_WINDOW_MS ?? "7000"));
+
     this.status = {
       enabled: false,
       listening: false,
@@ -102,6 +201,9 @@ export class VoiceService {
     };
   }
 
+  /**
+   * Detects best available local transcription backend.
+   */
   async init(): Promise<void> {
     await this.detectBackend();
     this.emitStatus();
@@ -112,6 +214,8 @@ export class VoiceService {
     this.processing = false;
     this.commandWindowUntil = 0;
     this.chunkQueue = [];
+    this.wakeHits = 0;
+    this.lastWakeAtMs = 0;
     this.status.enabled = false;
     this.status.listening = false;
     this.status.pendingAudioChunks = 0;
@@ -132,13 +236,14 @@ export class VoiceService {
       this.commandWindowUntil = 0;
       this.chunkQueue = [];
       this.status.pendingAudioChunks = 0;
+      this.wakeHits = 0;
     }
 
     this.emitStatus();
     return this.getStatus();
   }
 
-  async pushAudio(base64Audio: string, mimeType = "audio/webm"): Promise<VoiceStatus> {
+  async pushAudio(base64Audio: string, mimeType = "audio/wav"): Promise<VoiceStatus> {
     if (!this.enabled) {
       return this.getStatus();
     }
@@ -155,7 +260,29 @@ export class VoiceService {
   }
 
   async simulateTranscript(rawTranscript: string): Promise<VoiceStatus> {
-    await this.processTranscript(rawTranscript);
+    const transcript = normalizeText(rawTranscript);
+    if (!transcript) {
+      return this.getStatus();
+    }
+
+    const lower = transcript.toLowerCase();
+    const wakeIndex = lower.indexOf(this.wakeWord);
+
+    if (wakeIndex >= 0) {
+      const afterWake = normalizeText(transcript.slice(wakeIndex + this.wakeWord.length));
+      const now = Date.now();
+      this.armCommandWindow(now);
+
+      if (afterWake) {
+        await this.processCommandTranscript(afterWake);
+      }
+      return this.getStatus();
+    }
+
+    if (Date.now() < this.commandWindowUntil) {
+      await this.processCommandTranscript(transcript);
+    }
+
     return this.getStatus();
   }
 
@@ -171,9 +298,25 @@ export class VoiceService {
       this.status.pendingAudioChunks = this.chunkQueue.length;
 
       try {
-        const transcript = await this.transcribeChunk(next);
+        const audioBuffer = Buffer.from(next.base64Audio, "base64");
+        if (audioBuffer.length === 0) {
+          continue;
+        }
+
+        const now = Date.now();
+        const inCommandWindow = now < this.commandWindowUntil;
+
+        if (!inCommandWindow) {
+          const wakeDetected = this.detectWakeOnset(audioBuffer, now);
+          if (wakeDetected) {
+            this.armCommandWindow(now);
+          }
+          continue;
+        }
+
+        const transcript = await this.transcribeAudio(audioBuffer, next.mimeType);
         if (transcript) {
-          await this.processTranscript(transcript);
+          await this.processCommandTranscript(transcript);
         }
       } catch (error) {
         this.setError(`Voice chunk processing failed: ${getErrorMessage(error)}`);
@@ -185,18 +328,51 @@ export class VoiceService {
     this.emitStatus();
   }
 
-  private async transcribeChunk(chunk: AudioChunk): Promise<string | null> {
-    const audioBuffer = Buffer.from(chunk.base64Audio, "base64");
-    if (audioBuffer.length === 0) {
-      return null;
+  private detectWakeOnset(audioBuffer: Buffer, nowMs: number): boolean {
+    if (nowMs - this.lastWakeAtMs < this.wakeCooldownMs) {
+      return false;
     }
 
-    const addonTranscript = await this.tryWhisperAddon(audioBuffer, chunk.mimeType);
+    const rms = rmsFromPcm16Wav(audioBuffer);
+    if (rms === null) {
+      this.wakeHits = 0;
+      return false;
+    }
+
+    if (rms >= this.wakeRmsThreshold) {
+      this.wakeHits += 1;
+    } else {
+      this.wakeHits = Math.max(0, this.wakeHits - 1);
+    }
+
+    if (this.wakeHits < this.wakeRequiredHits) {
+      return false;
+    }
+
+    this.wakeHits = 0;
+    this.lastWakeAtMs = nowMs;
+    return true;
+  }
+
+  private armCommandWindow(nowMs: number): void {
+    this.commandWindowUntil = nowMs + this.commandWindowMs;
+    this.status.lastWakeAtIso = new Date(nowMs).toISOString();
+    this.emitEvent({
+      type: "wake",
+      atIso: new Date(nowMs).toISOString(),
+      message: "Wake trigger detected.",
+      status: this.getStatus()
+    });
+    this.emitStatus();
+  }
+
+  private async transcribeAudio(audioBuffer: Buffer, mimeType: string): Promise<string | null> {
+    const addonTranscript = await this.tryWhisperAddon(audioBuffer, mimeType);
     if (addonTranscript) {
       return addonTranscript;
     }
 
-    const cliTranscript = await this.tryWhisperCli(audioBuffer, chunk.mimeType);
+    const cliTranscript = await this.tryWhisperCli(audioBuffer, mimeType);
     if (cliTranscript) {
       return cliTranscript;
     }
@@ -204,7 +380,7 @@ export class VoiceService {
     return null;
   }
 
-  private async processTranscript(rawTranscript: string): Promise<void> {
+  private async processCommandTranscript(rawTranscript: string): Promise<void> {
     const transcript = normalizeText(rawTranscript);
     if (!transcript) {
       return;
@@ -213,32 +389,17 @@ export class VoiceService {
     this.status.lastTranscript = transcript;
     this.emitStatus();
 
-    const transcriptLower = transcript.toLowerCase();
-    const wakeIndex = transcriptLower.indexOf(this.wakeWord);
-    const now = Date.now();
+    const lower = transcript.toLowerCase();
+    const command = lower.startsWith(this.wakeWord)
+      ? normalizeText(transcript.slice(this.wakeWord.length))
+      : transcript;
 
-    if (wakeIndex >= 0) {
-      const afterWake = normalizeText(transcript.slice(wakeIndex + this.wakeWord.length));
-      this.status.lastWakeAtIso = new Date().toISOString();
-      this.emitEvent({
-        type: "wake",
-        atIso: new Date().toISOString(),
-        transcript,
-        status: this.getStatus()
-      });
-
-      if (afterWake) {
-        await this.dispatchCommand(afterWake, transcript);
-      } else {
-        this.commandWindowUntil = now + 8_000;
-      }
+    if (!command) {
       return;
     }
 
-    if (this.commandWindowUntil > now) {
-      this.commandWindowUntil = 0;
-      await this.dispatchCommand(transcript, transcript);
-    }
+    await this.dispatchCommand(command, transcript);
+    this.commandWindowUntil = 0;
   }
 
   private async dispatchCommand(command: string, transcript: string): Promise<void> {
@@ -297,7 +458,8 @@ export class VoiceService {
 
     const addonRecord = addon as UnknownRecord;
     const maybeDefault = addonRecord.default;
-    const defaultRecord = maybeDefault && typeof maybeDefault === "object" ? (maybeDefault as UnknownRecord) : undefined;
+    const defaultRecord =
+      maybeDefault && typeof maybeDefault === "object" ? (maybeDefault as UnknownRecord) : undefined;
 
     const fnCandidates: unknown[] = [
       addonRecord.transcribe,
@@ -368,7 +530,7 @@ export class VoiceService {
   }
 
   private async writeTempAudio(audioBuffer: Buffer, mimeType: string): Promise<TempAudio> {
-    const ext = mimeType.includes("wav") ? "wav" : mimeType.includes("webm") ? "webm" : "bin";
+    const ext = mimeType.includes("wav") ? "wav" : mimeType.includes("webm") ? "webm" : "wav";
     const tempDir = await mkdtemp(join(tmpdir(), "jarvis-voice-"));
     const audioPath = join(tempDir, `clip.${ext}`);
     const outputBasePath = join(tempDir, "result");

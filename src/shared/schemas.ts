@@ -31,6 +31,8 @@ export const customCommandUpdateSchema = z
     message: "At least one field is required."
   });
 
+export const customCommandNameSchema = z.string().trim().min(1).max(120);
+
 export const voiceAudioSchema = z.object({
   base64Audio: z.string().min(8).max(8_000_000),
   mimeType: z.string().trim().min(3).max(80).optional()

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   IPC_CHANNELS,
+  type CommandFeedbackEvent,
   type CreateCustomCommandInput,
   type JarvisApi,
   type MissionMode,
@@ -28,9 +29,12 @@ const api: JarvisApi = {
   updateCustomCommand: async (id: string, updates: UpdateCustomCommandInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateCustomCommand, id, updates),
   deleteCustomCommand: async (id: string) => ipcRenderer.invoke(IPC_CHANNELS.deleteCustomCommand, id),
+  listCustomCommands: async () => ipcRenderer.invoke(IPC_CHANNELS.listCustomCommands),
+  runCustomCommandByName: async (name: string, bypassConfirmation = false) =>
+    ipcRenderer.invoke(IPC_CHANNELS.runCustomCommandByName, name, bypassConfirmation),
   getVoiceStatus: async () => ipcRenderer.invoke(IPC_CHANNELS.getVoiceStatus),
   setVoiceEnabled: async (enabled: boolean) => ipcRenderer.invoke(IPC_CHANNELS.setVoiceEnabled, enabled),
-  pushVoiceAudio: async (base64Audio: string, mimeType = "audio/webm") =>
+  pushVoiceAudio: async (base64Audio: string, mimeType = "audio/wav") =>
     ipcRenderer.invoke(IPC_CHANNELS.pushVoiceAudio, base64Audio, mimeType),
   simulateVoiceTranscript: async (transcript: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.simulateVoiceTranscript, transcript),
@@ -39,6 +43,13 @@ const api: JarvisApi = {
     ipcRenderer.on(IPC_CHANNELS.voiceEvent, wrapped);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.voiceEvent, wrapped);
+    };
+  },
+  onCommandFeedback: (listener: (event: CommandFeedbackEvent) => void) => {
+    const wrapped = (_event: unknown, payload: CommandFeedbackEvent) => listener(payload);
+    ipcRenderer.on(IPC_CHANNELS.commandFeedback, wrapped);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.commandFeedback, wrapped);
     };
   }
 };

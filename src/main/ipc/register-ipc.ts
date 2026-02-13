@@ -3,6 +3,7 @@ import { IPC_CHANNELS, type MissionMode } from "../../shared/contracts";
 import {
   commandSchema,
   customCommandCreateSchema,
+  customCommandNameSchema,
   customCommandUpdateSchema,
   voiceAudioSchema,
   voiceEnabledSchema,
@@ -24,7 +25,7 @@ export const registerIpcHandlers = (runtime: JarvisRuntime, voiceService: VoiceS
 
   replaceHandler(IPC_CHANNELS.runCommand, async (_event, command: string, bypassConfirmation?: boolean) => {
     const input = commandSchema.parse(command);
-    return runtime.runCommand(input, Boolean(bypassConfirmation));
+    return runtime.runCommand(input, Boolean(bypassConfirmation), "user");
   });
 
   replaceHandler(IPC_CHANNELS.setMode, async (_event, mode: MissionMode) => {
@@ -71,6 +72,16 @@ export const registerIpcHandlers = (runtime: JarvisRuntime, voiceService: VoiceS
     return runtime.deleteCustomCommand(id);
   });
 
+  replaceHandler(IPC_CHANNELS.listCustomCommands, async () => runtime.listCustomCommands());
+
+  replaceHandler(
+    IPC_CHANNELS.runCustomCommandByName,
+    async (_event, name: string, bypassConfirmation?: boolean) => {
+      const parsed = customCommandNameSchema.parse(name);
+      return runtime.runCustomCommandByName(parsed, Boolean(bypassConfirmation));
+    }
+  );
+
   replaceHandler(IPC_CHANNELS.getVoiceStatus, async () => voiceService.getStatus());
 
   replaceHandler(IPC_CHANNELS.setVoiceEnabled, async (_event, enabled: boolean) => {
@@ -80,7 +91,7 @@ export const registerIpcHandlers = (runtime: JarvisRuntime, voiceService: VoiceS
 
   replaceHandler(IPC_CHANNELS.pushVoiceAudio, async (_event, base64Audio: string, mimeType?: string) => {
     const payload = voiceAudioSchema.parse({ base64Audio, mimeType });
-    return voiceService.pushAudio(payload.base64Audio, payload.mimeType ?? "audio/webm");
+    return voiceService.pushAudio(payload.base64Audio, payload.mimeType ?? "audio/wav");
   });
 
   replaceHandler(IPC_CHANNELS.simulateVoiceTranscript, async (_event, transcript: string) => {

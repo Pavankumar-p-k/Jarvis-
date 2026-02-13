@@ -1,9 +1,11 @@
-import { execSync, spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import type {
   ActionResult,
   AlarmItem,
   AssistantState,
+  CommandFeedbackEvent,
+  CommandFeedbackSource,
   CommandRecord,
   CommandResponse,
   CreateCustomCommandInput,
@@ -21,6 +23,7 @@ import { createId } from "../../shared/id";
 import { commandSchema } from "../../shared/schemas";
 import { AutomationEngine } from "./automation-engine";
 import { BriefingService } from "./briefing-service";
+import { CustomCommandService, type CustomCommandMatch } from "./custom-command-service";
 import { IntentParser } from "./intent-parser";
 import { JsonStore } from "./json-store";
 import { LocalLlmAdapter } from "./llm-adapter";
@@ -29,10 +32,14 @@ import { PermissionGuard } from "./permission-guard";
 import { PluginService } from "./plugin-service";
 import { Scheduler } from "./scheduler";
 import { TelemetryService } from "./telemetry-service";
+import { isLoopbackHost } from "./offline-policy";
 
 interface RuntimeOptions {
   dataDir: string;
   pluginsDir: string;
+  strictOffline?: boolean;
+  openExternalUrl?: (url: string) => Promise<void>;
+  onCommandFeedback?: (event: CommandFeedbackEvent) => void;
 }
 
 interface AppLaunchSpec {
@@ -40,18 +47,15 @@ interface AppLaunchSpec {
   args: string[];
 }
 
-interface CustomCommandMatch {
-  command: CustomCommand;
-  args: string;
+interface DispatchContext {
+  depth: number;
+  writeHistory: boolean;
+  source: CommandFeedbackSource;
 }
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 const normalizeSpaces = (value: string): string => value.trim().replace(/\s+/g, " ");
-
-const normalizeTrigger = (value: string): string => normalizeSpaces(value).toLowerCase();
-
-const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const defaultRoutines = (): RoutineItem[] => [
   {
@@ -109,6 +113,9 @@ const appLaunchMap: Record<string, AppLaunchSpec> = {
   steam: { file: "cmd", args: ["/c", "start", "", "steam"] }
 };
 
+/**
+ * Core runtime orchestrator for command dispatch, persistence, and assistant state transitions.
+ */
 export class JarvisRuntime {
   private readonly logger = new Logger();
   private readonly parser = new IntentParser();
@@ -119,12 +126,20 @@ export class JarvisRuntime {
   private readonly briefingService = new BriefingService();
   private readonly llm = new LocalLlmAdapter();
   private readonly pluginService: PluginService;
+  private readonly customCommandService: CustomCommandService;
   private readonly stateStore: JsonStore<AssistantState>;
+  private readonly openExternalUrl?: (url: string) => Promise<void>;
+  private readonly onCommandFeedback?: (event: CommandFeedbackEvent) => void;
+  private readonly strictOffline: boolean;
   private state: AssistantState;
 
   constructor(options: RuntimeOptions) {
     this.stateStore = new JsonStore(join(options.dataDir, "state.json"));
     this.pluginService = new PluginService(options.pluginsDir, this.logger);
+    this.customCommandService = new CustomCommandService(join(options.dataDir, "custom-commands.json"));
+    this.openExternalUrl = options.openExternalUrl;
+    this.onCommandFeedback = options.onCommandFeedback;
+    this.strictOffline = options.strictOffline ?? true;
     this.state = buildDefaultState();
   }
 
@@ -138,9 +153,9 @@ export class JarvisRuntime {
     if (!Array.isArray(this.state.automations) || this.state.automations.length === 0) {
       this.state.automations = defaultAutomations();
     }
-    if (!Array.isArray(this.state.customCommands)) {
-      this.state.customCommands = [];
-    }
+
+    const seedCustomCommands = Array.isArray(this.state.customCommands) ? this.state.customCommands : [];
+    this.state.customCommands = this.customCommandService.init(seedCustomCommands);
 
     this.state.plugins = this.loadPluginsWithState(this.state.plugins);
     this.refreshTelemetry();
@@ -161,6 +176,10 @@ export class JarvisRuntime {
     return clone(this.state);
   }
 
+  listCustomCommands(): CustomCommand[] {
+    return this.customCommandService.list();
+  }
+
   async setMode(mode: MissionMode): Promise<AssistantState> {
     this.state.mode = mode;
     this.state.memory.lastMode = mode;
@@ -171,27 +190,9 @@ export class JarvisRuntime {
   }
 
   async createCustomCommand(input: CreateCustomCommandInput): Promise<AssistantState> {
-    const name = normalizeSpaces(input.name);
-    const trigger = normalizeTrigger(input.trigger);
-    const action = normalizeSpaces(input.action);
+    const created = this.customCommandService.create(input);
+    this.state.customCommands = this.customCommandService.list();
 
-    if (this.hasCustomCommandConflict(name, trigger)) {
-      throw new Error("Custom command name or trigger already exists.");
-    }
-
-    const nowIso = new Date().toISOString();
-    const created: CustomCommand = {
-      id: createId("cc"),
-      name,
-      trigger,
-      action,
-      passThroughArgs: Boolean(input.passThroughArgs),
-      enabled: true,
-      createdAtIso: nowIso,
-      updatedAtIso: nowIso
-    };
-
-    this.state.customCommands.unshift(created);
     this.pushSuggestion(`Custom command created: ${created.name}`, "Command builder");
     this.recordCommand(
       `custom command create ${created.name}`,
@@ -204,35 +205,14 @@ export class JarvisRuntime {
   }
 
   async updateCustomCommand(id: string, updates: UpdateCustomCommandInput): Promise<AssistantState> {
-    const target = this.state.customCommands.find((item) => item.id === id);
-    if (!target) {
-      throw new Error("Custom command not found.");
-    }
+    const updated = this.customCommandService.update(id, updates);
+    this.state.customCommands = this.customCommandService.list();
 
-    const nextName = updates.name !== undefined ? normalizeSpaces(updates.name) : target.name;
-    const nextTrigger = updates.trigger !== undefined ? normalizeTrigger(updates.trigger) : target.trigger;
-    const nextAction = updates.action !== undefined ? normalizeSpaces(updates.action) : target.action;
-
-    if (this.hasCustomCommandConflict(nextName, nextTrigger, id)) {
-      throw new Error("Another custom command already uses that name or trigger.");
-    }
-
-    target.name = nextName;
-    target.trigger = nextTrigger;
-    target.action = nextAction;
-    if (updates.passThroughArgs !== undefined) {
-      target.passThroughArgs = updates.passThroughArgs;
-    }
-    if (updates.enabled !== undefined) {
-      target.enabled = updates.enabled;
-    }
-    target.updatedAtIso = new Date().toISOString();
-
-    this.pushSuggestion(`Custom command updated: ${target.name}`, "Command builder");
+    this.pushSuggestion(`Custom command updated: ${updated.name}`, "Command builder");
     this.recordCommand(
-      `custom command update ${target.name}`,
+      `custom command update ${updated.name}`,
       "custom_command",
-      { ok: true, message: `Custom command "${target.name}" updated.` },
+      { ok: true, message: `Custom command "${updated.name}" updated.` },
       true
     );
     this.saveState();
@@ -240,13 +220,9 @@ export class JarvisRuntime {
   }
 
   async deleteCustomCommand(id: string): Promise<AssistantState> {
-    const index = this.state.customCommands.findIndex((item) => item.id === id);
-    if (index < 0) {
-      throw new Error("Custom command not found.");
-    }
+    const removed = this.customCommandService.delete(id);
+    this.state.customCommands = this.customCommandService.list();
 
-    const removed = this.state.customCommands[index];
-    this.state.customCommands.splice(index, 1);
     this.pushSuggestion(`Custom command removed: ${removed.name}`, "Command builder");
     this.recordCommand(
       `custom command delete ${removed.name}`,
@@ -256,6 +232,26 @@ export class JarvisRuntime {
     );
     this.saveState();
     return this.getState();
+  }
+
+  async runCustomCommandByName(name: string, bypassConfirmation = false): Promise<CommandResponse> {
+    const command = this.customCommandService.findByNameOrTrigger(name);
+    if (!command) {
+      const result: ActionResult = { ok: false, message: `Custom command "${name}" not found.` };
+      this.emitCommandFeedback(`run custom ${name}`, result, "custom");
+      return {
+        result,
+        state: this.getState()
+      };
+    }
+
+    const response = await this.dispatchCommand(command.trigger, bypassConfirmation, {
+      depth: 0,
+      writeHistory: true,
+      source: "custom"
+    });
+    this.emitCommandFeedback(`run custom ${command.name}`, response.result, "custom");
+    return response;
   }
 
   async completeReminder(id: string): Promise<AssistantState> {
@@ -276,7 +272,7 @@ export class JarvisRuntime {
         state: this.getState()
       };
     }
-    return this.runCommand(record.command, true);
+    return this.runCommand(record.command, true, "system");
   }
 
   async generateBriefing(): Promise<MorningBriefing> {
@@ -344,20 +340,36 @@ export class JarvisRuntime {
     const result = this.terminateProcessByPid(pid);
     this.recordCommand(`terminate process ${pid}`, "system_info", result, true);
     this.saveState();
+    this.emitCommandFeedback(`terminate process ${pid}`, result, "system");
     return { result, state: this.getState() };
   }
 
-  async runCommand(rawCommand: string, bypassConfirmation = false): Promise<CommandResponse> {
-    return this.executeCommand(rawCommand, bypassConfirmation, 0, true);
+  async runCommand(
+    rawCommand: string,
+    bypassConfirmation = false,
+    source: CommandFeedbackSource = "user"
+  ): Promise<CommandResponse> {
+    const response = await this.dispatchCommand(rawCommand, bypassConfirmation, {
+      depth: 0,
+      writeHistory: true,
+      source
+    });
+    this.emitCommandFeedback(normalizeSpaces(rawCommand), response.result, source);
+    return response;
   }
 
-  private async executeCommand(
+  /**
+   * Safe dispatcher flow:
+   * 1) custom commands
+   * 2) plugins
+   * 3) built-ins + parser fallback
+   */
+  private async dispatchCommand(
     rawCommand: string,
     bypassConfirmation: boolean,
-    depth: number,
-    writeHistory: boolean
+    context: DispatchContext
   ): Promise<CommandResponse> {
-    if (depth > 4) {
+    if (context.depth > 4) {
       return {
         result: { ok: false, message: "Command recursion blocked." },
         state: this.getState()
@@ -374,14 +386,14 @@ export class JarvisRuntime {
 
     const normalized = normalizeSpaces(command.data);
 
-    const customMatch = this.findCustomCommandMatch(normalized);
+    const customMatch = this.customCommandService.match(normalized);
     if (customMatch) {
-      return this.executeCustomCommand(normalized, customMatch, bypassConfirmation, depth, writeHistory);
+      return this.executeCustomCommand(normalized, customMatch, bypassConfirmation, context);
     }
 
     const plugin = this.pluginService.findByCommand(normalized, this.state.plugins);
     if (plugin) {
-      return this.executePluginCommand(plugin, normalized, plugin.manifest.permissionLevel, bypassConfirmation, writeHistory);
+      return this.executePluginCommand(plugin, normalized, plugin.manifest.permissionLevel, bypassConfirmation, context);
     }
 
     const lower = normalized.toLowerCase();
@@ -390,7 +402,7 @@ export class JarvisRuntime {
       if (["work", "gaming", "focus", "night"].includes(mode)) {
         await this.setMode(mode);
         const result = { ok: true, message: `Mode updated to ${mode}.` };
-        this.recordCommand(normalized, "system_info", result, writeHistory);
+        this.recordCommand(normalized, "system_info", result, context.writeHistory);
         return { result, state: this.getState() };
       }
     }
@@ -400,7 +412,7 @@ export class JarvisRuntime {
       const llm = await this.llm.ask(prompt);
       const message = llm ?? "Local LLM unavailable. Falling back to rules-only mode.";
       const result = { ok: true, message };
-      this.recordCommand(normalized, "unknown", result, writeHistory);
+      this.recordCommand(normalized, "unknown", result, context.writeHistory);
       return { result, state: this.getState() };
     }
 
@@ -409,7 +421,7 @@ export class JarvisRuntime {
 
     if (!this.guard.canRun(requiredPermission)) {
       const result = { ok: false, message: "Permission denied." };
-      this.recordCommand(normalized, parsedIntent.type, result, writeHistory);
+      this.recordCommand(normalized, parsedIntent.type, result, context.writeHistory);
       return { result, state: this.getState() };
     }
 
@@ -425,7 +437,7 @@ export class JarvisRuntime {
     }
 
     const result = await this.executeIntent(parsedIntent.type, parsedIntent.entities);
-    this.recordCommand(normalized, parsedIntent.type, result, writeHistory);
+    this.recordCommand(normalized, parsedIntent.type, result, context.writeHistory);
 
     const auto = this.automationEngine.evaluate(this.state.automations, {
       command: normalized,
@@ -438,7 +450,11 @@ export class JarvisRuntime {
       this.state.mode = auto.mode;
     }
     for (const autoCommand of auto.commands) {
-      await this.executeCommand(autoCommand, true, depth + 1, false);
+      await this.dispatchCommand(autoCommand, true, {
+        depth: context.depth + 1,
+        writeHistory: false,
+        source: "system"
+      });
     }
 
     this.saveState();
@@ -449,26 +465,30 @@ export class JarvisRuntime {
     sourceCommand: string,
     customMatch: CustomCommandMatch,
     bypassConfirmation: boolean,
-    depth: number,
-    writeHistory: boolean
+    context: DispatchContext
   ): Promise<CommandResponse> {
-    const targetCommand = this.buildCustomTarget(customMatch.command, customMatch.args);
+    const targetCommand = this.customCommandService.buildTarget(customMatch.command, customMatch.args);
 
     if (!targetCommand) {
       const result: ActionResult = { ok: false, message: "Custom command action is empty." };
-      this.recordCommand(sourceCommand, "custom_command", result, writeHistory);
+      this.recordCommand(sourceCommand, "custom_command", result, context.writeHistory);
       this.saveState();
       return { result, state: this.getState() };
     }
 
     if (targetCommand.toLowerCase() === sourceCommand.toLowerCase()) {
       const result: ActionResult = { ok: false, message: "Custom command points to itself." };
-      this.recordCommand(sourceCommand, "custom_command", result, writeHistory);
+      this.recordCommand(sourceCommand, "custom_command", result, context.writeHistory);
       this.saveState();
       return { result, state: this.getState() };
     }
 
-    const delegated = await this.executeCommand(targetCommand, bypassConfirmation, depth + 1, false);
+    const delegated = await this.dispatchCommand(targetCommand, bypassConfirmation, {
+      depth: context.depth + 1,
+      writeHistory: false,
+      source: context.source
+    });
+
     const result: ActionResult = {
       ok: delegated.result.ok,
       message: delegated.result.ok
@@ -480,7 +500,7 @@ export class JarvisRuntime {
       }
     };
 
-    this.recordCommand(sourceCommand, "custom_command", result, writeHistory);
+    this.recordCommand(sourceCommand, "custom_command", result, context.writeHistory);
     this.saveState();
     return { result, state: this.getState() };
   }
@@ -490,7 +510,7 @@ export class JarvisRuntime {
     command: string,
     permission: PermissionLevel,
     bypassConfirmation: boolean,
-    writeHistory: boolean
+    context: DispatchContext
   ): Promise<CommandResponse> {
     if (this.guard.needsConfirmation(permission, bypassConfirmation)) {
       return {
@@ -504,7 +524,7 @@ export class JarvisRuntime {
     }
 
     const result = await this.pluginService.executeCommand(pluginState, command, this.getState());
-    this.recordCommand(command, "plugin_command", result, writeHistory);
+    this.recordCommand(command, "plugin_command", result, context.writeHistory);
     this.saveState();
     return { result, state: this.getState() };
   }
@@ -548,7 +568,11 @@ export class JarvisRuntime {
         return { ok: false, message: "Routine not found." };
       }
       for (const step of routine.steps) {
-        await this.executeCommand(step.command, true, 1, false);
+        await this.dispatchCommand(step.command, true, {
+          depth: 1,
+          writeHistory: false,
+          source: "system"
+        });
       }
       routine.lastRunAtIso = new Date().toISOString();
       return { ok: true, message: `Routine "${routine.name}" executed.` };
@@ -581,7 +605,7 @@ export class JarvisRuntime {
     }
 
     if (app.startsWith("http://") || app.startsWith("https://")) {
-      return this.openExternalUrl(app);
+      return this.openExternal(app);
     }
 
     const launchSpec = appLaunchMap[app];
@@ -602,7 +626,7 @@ export class JarvisRuntime {
     }
   }
 
-  private openExternalUrl(rawUrl: string): ActionResult {
+  private openExternal(rawUrl: string): ActionResult {
     let parsed: URL;
 
     try {
@@ -615,41 +639,54 @@ export class JarvisRuntime {
       return { ok: false, message: "Only http/https URLs are allowed." };
     }
 
-    try {
-      spawn("cmd", ["/c", "start", "", parsed.toString()], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true
-      }).unref();
-      return { ok: true, message: `Opening URL ${parsed.toString()}` };
-    } catch {
-      return { ok: false, message: "Failed to open URL." };
+    if (this.strictOffline && !isLoopbackHost(parsed.hostname)) {
+      return {
+        ok: false,
+        message: "Strict offline mode blocked remote URL launch. Use localhost/127.0.0.1 only."
+      };
     }
+
+    if (this.openExternalUrl) {
+      void this.openExternalUrl(parsed.toString());
+      return { ok: true, message: `Opening URL ${parsed.toString()}` };
+    }
+
+    return { ok: false, message: "External URL handler unavailable." };
   }
 
   private sendMediaPlayPause(successMessage: string): ActionResult {
-    try {
-      execSync(
-        "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{MEDIA_PLAY_PAUSE}')\"",
-        { windowsHide: true }
-      );
+    const result = spawnSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{MEDIA_PLAY_PAUSE}')"
+      ],
+      { windowsHide: true }
+    );
+
+    if (result.status === 0) {
       return { ok: true, message: successMessage };
-    } catch {
-      return { ok: false, message: "Unable to send media key on this system." };
     }
+
+    return { ok: false, message: "Unable to send media key on this system." };
   }
 
   private terminateProcessByPid(pid: number): ActionResult {
     if (!Number.isFinite(pid) || pid <= 0) {
       return { ok: false, message: "Invalid PID." };
     }
-    try {
-      execSync(`taskkill /PID ${Math.floor(pid)} /F`, { windowsHide: true });
-      this.refreshTelemetry();
-      return { ok: true, message: `Process ${Math.floor(pid)} terminated.` };
-    } catch {
+
+    const result = spawnSync("taskkill", ["/PID", String(Math.floor(pid)), "/F"], {
+      windowsHide: true
+    });
+
+    if (result.status !== 0) {
       return { ok: false, message: `Failed to terminate PID ${Math.floor(pid)}.` };
     }
+
+    this.refreshTelemetry();
+    return { ok: true, message: `Process ${Math.floor(pid)} terminated.` };
   }
 
   private createReminder(entities: Record<string, string>): ReminderItem {
@@ -720,6 +757,7 @@ export class JarvisRuntime {
     if (!writeHistory) {
       return;
     }
+
     const record: CommandRecord = {
       id: createId("cmd"),
       command,
@@ -728,6 +766,7 @@ export class JarvisRuntime {
       resultMessage: result.message,
       timestampIso: new Date().toISOString()
     };
+
     this.state.commandHistory.unshift(record);
     this.state.commandHistory = this.state.commandHistory.slice(0, 120);
     this.bumpCommonCommand(command);
@@ -760,6 +799,7 @@ export class JarvisRuntime {
   }
 
   private saveState(): void {
+    this.state.customCommands = this.customCommandService.list();
     this.stateStore.write(this.state);
   }
 
@@ -771,6 +811,7 @@ export class JarvisRuntime {
         { enabled: plugin.enabled, installedAtIso: plugin.installedAtIso }
       ])
     );
+
     return this.pluginService.loadPlugins().map((plugin) => {
       const found = previousMap.get(plugin.manifest.id);
       if (!found) {
@@ -784,59 +825,21 @@ export class JarvisRuntime {
     });
   }
 
-  private findCustomCommandMatch(rawCommand: string): CustomCommandMatch | undefined {
-    const commandText = normalizeSpaces(rawCommand);
-    const lower = commandText.toLowerCase();
-
-    const enabledCommands = this.state.customCommands
-      .filter((item) => item.enabled)
-      .sort((a, b) => normalizeTrigger(b.trigger).length - normalizeTrigger(a.trigger).length);
-
-    for (const item of enabledCommands) {
-      const trigger = normalizeTrigger(item.trigger);
-      const name = item.name.trim().toLowerCase();
-
-      if (lower === trigger || lower === name) {
-        return { command: item, args: "" };
-      }
-
-      const match = lower.match(new RegExp(`^${escapeRegex(trigger)}\\s+(.+)$`, "i"));
-      if (match) {
-        const args = normalizeSpaces(match[1] ?? "");
-        return { command: item, args };
-      }
+  private emitCommandFeedback(
+    command: string,
+    result: ActionResult,
+    source: CommandFeedbackSource
+  ): void {
+    if (!this.onCommandFeedback) {
+      return;
     }
 
-    return undefined;
-  }
-
-  private buildCustomTarget(command: CustomCommand, args: string): string {
-    const action = command.action.trim();
-    if (!action) {
-      return "";
-    }
-
-    if (action.includes("{args}")) {
-      return normalizeSpaces(action.replace("{args}", args));
-    }
-
-    if (command.passThroughArgs && args) {
-      return normalizeSpaces(`${action} ${args}`);
-    }
-
-    return action;
-  }
-
-  private hasCustomCommandConflict(name: string, trigger: string, currentId?: string): boolean {
-    const normalizedName = name.trim().toLowerCase();
-    const normalizedTrigger = normalizeTrigger(trigger);
-
-    return this.state.customCommands.some((item) => {
-      if (currentId && item.id === currentId) {
-        return false;
-      }
-
-      return item.name.trim().toLowerCase() === normalizedName || normalizeTrigger(item.trigger) === normalizedTrigger;
+    this.onCommandFeedback({
+      id: createId("fb"),
+      atIso: new Date().toISOString(),
+      command,
+      source,
+      result
     });
   }
 }

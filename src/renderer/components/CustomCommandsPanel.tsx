@@ -1,27 +1,44 @@
 import { useState } from "react";
 import type { CreateCustomCommandInput, CustomCommand, UpdateCustomCommandInput } from "../../shared/contracts";
 
-interface CustomCommandPanelProps {
+interface CustomCommandsPanelProps {
   commands: CustomCommand[];
   onCreate: (input: CreateCustomCommandInput) => Promise<void>;
   onUpdate: (id: string, updates: UpdateCustomCommandInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
-  onRun: (trigger: string) => void;
+  onTestRun: (name: string) => Promise<void>;
+  onRefresh: () => Promise<void>;
 }
 
-export const CustomCommandPanel = ({
+/**
+ * UI manager for listing and editing user-defined custom commands.
+ */
+export const CustomCommandsPanel = ({
   commands,
   onCreate,
   onUpdate,
   onDelete,
-  onRun
-}: CustomCommandPanelProps): JSX.Element => {
+  onTestRun,
+  onRefresh
+}: CustomCommandsPanelProps): JSX.Element => {
   const [name, setName] = useState("");
   const [trigger, setTrigger] = useState("");
   const [action, setAction] = useState("");
   const [passThroughArgs, setPassThroughArgs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const withBusy = async (work: () => Promise<void>): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      await work();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Custom command operation failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleCreate = async (): Promise<void> => {
     const payload: CreateCustomCommandInput = {
@@ -31,19 +48,13 @@ export const CustomCommandPanel = ({
       passThroughArgs
     };
 
-    setBusy(true);
-    setError(null);
-    try {
+    await withBusy(async () => {
       await onCreate(payload);
       setName("");
       setTrigger("");
       setAction("");
       setPassThroughArgs(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to create custom command.");
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const handleEdit = async (command: CustomCommand): Promise<void> => {
@@ -62,48 +73,30 @@ export const CustomCommandPanel = ({
       return;
     }
 
-    setBusy(true);
-    setError(null);
-    try {
+    await withBusy(async () => {
       await onUpdate(command.id, {
         name: nextName,
         trigger: nextTrigger,
         action: nextAction
       });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to update custom command.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleToggleEnabled = async (command: CustomCommand): Promise<void> => {
-    setBusy(true);
-    setError(null);
-    try {
-      await onUpdate(command.id, { enabled: !command.enabled });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to toggle custom command.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleDelete = async (id: string): Promise<void> => {
-    setBusy(true);
-    setError(null);
-    try {
-      await onDelete(id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to delete custom command.");
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
     <section className="panel custom-command-panel">
-      <header className="panel-title">Custom Commands</header>
+      <header className="panel-title">
+        Custom Commands
+        <button
+          type="button"
+          className="mini-btn"
+          onClick={() => {
+            void withBusy(onRefresh);
+          }}
+          disabled={busy}
+        >
+          Refresh
+        </button>
+      </header>
 
       <div className="custom-command-form">
         <input
@@ -156,14 +149,24 @@ export const CustomCommandPanel = ({
             </div>
             <div className="custom-command-actions">
               <strong>{command.enabled ? "Enabled" : "Disabled"}</strong>
-              <button type="button" className="mini-btn" onClick={() => onRun(command.trigger)}>
-                Run
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => {
+                  void withBusy(async () => {
+                    await onTestRun(command.name);
+                  });
+                }}
+              >
+                Test Run
               </button>
               <button
                 type="button"
                 className="mini-btn"
                 onClick={() => {
-                  void handleToggleEnabled(command);
+                  void withBusy(async () => {
+                    await onUpdate(command.id, { enabled: !command.enabled });
+                  });
                 }}
               >
                 {command.enabled ? "Disable" : "Enable"}
@@ -181,7 +184,9 @@ export const CustomCommandPanel = ({
                 type="button"
                 className="danger-btn"
                 onClick={() => {
-                  void handleDelete(command.id);
+                  void withBusy(async () => {
+                    await onDelete(command.id);
+                  });
                 }}
               >
                 Delete
