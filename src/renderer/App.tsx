@@ -12,6 +12,7 @@ import type {
 } from "../shared/contracts";
 import { AgentTabs } from "./components/AgentTabs";
 import { AutomationBoard } from "./components/AutomationBoard";
+import { BootSequence } from "./components/BootSequence";
 import { CustomCommandsPanel } from "./components/CustomCommandsPanel";
 import { HudBackground } from "./components/HudBackground";
 import { MissionModes } from "./components/MissionModes";
@@ -46,9 +47,29 @@ const dateStamp = (value: Date): string =>
     })
     .toUpperCase();
 
+const BOOT_STAGES = [
+  "INIT DISPLAY MATRIX",
+  "MOUNT LOCAL STORAGE",
+  "SPAWN AGENTS",
+  "LOAD COMMAND BUS",
+  "SYNC VOICE PIPELINE",
+  "FINALIZING INTERFACE"
+];
+
+const KEYBOARD_LAYOUT = [
+  ["ESC", "`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "BACK"],
+  ["TAB", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "[", "]", "ENTER"],
+  ["CAPS", "A", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'", "\\", "BLANK"],
+  ["SHIFT", "<", "Z", "X", "C", "V", "B", "N", "M", ",", ".", "/", "SHIFT", "UP"],
+  ["CTRL", "FN", "SPACE", "ALT GR", "CTRL", "LEFT", "DOWN", "RIGHT"]
+];
+
 export const App = (): JSX.Element => {
   const [state, setState] = useState<AssistantState | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [bootProgress, setBootProgress] = useState(0);
+  const [bootStage, setBootStage] = useState(BOOT_STAGES[0]);
+  const [bootComplete, setBootComplete] = useState(false);
   const [now, setNow] = useState<Date>(() => new Date());
   const [audioCuesEnabled, setAudioCuesEnabled] = useState(true);
   const [commandInput, setCommandInput] = useState("");
@@ -65,6 +86,41 @@ export const App = (): JSX.Element => {
 
   const mode: MissionMode = state?.mode ?? "work";
   const commandCount = useMemo(() => state?.commandHistory.length ?? 0, [state]);
+
+  useEffect(() => {
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const stageIndex = Math.min(BOOT_STAGES.length - 1, Math.floor(elapsed / 450));
+      setBootStage(BOOT_STAGES[stageIndex]);
+      setBootProgress((current) => {
+        const ceiling = state ? 100 : 96;
+        if (current >= ceiling) {
+          return current;
+        }
+        const step = state ? 3 : current < 55 ? 4 : 2;
+        return Math.min(ceiling, current + step);
+      });
+    }, 85);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [state]);
+
+  useEffect(() => {
+    if (!state || bootProgress < 100) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setBootComplete(true);
+    }, 320);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [state, bootProgress]);
 
   const playCue = (frequency: number, durationSec = 0.06): void => {
     if (!audioCuesEnabled) {
@@ -286,15 +342,12 @@ export const App = (): JSX.Element => {
     return [...historyLines, ...hints].slice(-18);
   }, [state]);
 
+  if (!bootComplete) {
+    return <BootSequence progress={bootProgress} stage={bootStage} ready={Boolean(state)} error={bootError} />;
+  }
+
   if (!state) {
-    return (
-      <div className="booting">
-        <div>
-          <div>Booting Jarvis Core...</div>
-          {bootError && <small>{bootError}</small>}
-        </div>
-      </div>
-    );
+    return <BootSequence progress={bootProgress} stage={bootStage} ready={false} error={bootError} />;
   }
 
   const clock = now.toLocaleTimeString(undefined, {
@@ -378,9 +431,15 @@ export const App = (): JSX.Element => {
 
         <section className="hud-column center-col">
           <section className="panel terminal-panel">
-            <header className="panel-title">
-              <span>MAIN</span>
-              <span>COMMAND STREAM</span>
+            <header className="edex-stream-head">
+              <span className="edex-main-label">MAIN-</span>
+              <div className="edex-tab-strip">
+                {["#2-", "#3-", "#4-", "#5-"].map((tab, index) => (
+                  <span key={tab} className={index === 3 ? "active" : undefined}>
+                    {tab}
+                  </span>
+                ))}
+              </div>
             </header>
             <div className="terminal-stream">
               {terminalLines.length > 0 ? (
@@ -587,8 +646,27 @@ export const App = (): JSX.Element => {
 
       <footer className="panel-frame hud-footer">
         <div className="footer-kbd">
-          {["ESC", "TAB", "CAPS", "SHIFT", "CTRL", "ALT", "ENTER"].map((key) => (
-            <span key={key}>{key}</span>
+          {KEYBOARD_LAYOUT.map((row, rowIndex) => (
+            <div key={`row-${rowIndex}`} className="kbd-row">
+              {row.map((key, keyIndex) => (
+                <span
+                  key={`${rowIndex}-${keyIndex}-${key}`}
+                  className={[
+                    key === "SPACE" ? "wide space" : "",
+                    key === "BACK" ? "wide back" : "",
+                    key === "ENTER" ? "wide enter" : "",
+                    key === "TAB" ? "wide tab" : "",
+                    key === "CAPS" ? "wide caps" : "",
+                    key === "SHIFT" ? "wide shift" : "",
+                    key === "BLANK" ? "blank" : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || undefined}
+                >
+                  {key === "BLANK" ? "" : key}
+                </span>
+              ))}
+            </div>
           ))}
         </div>
         <button className="mini-btn" onClick={() => setAudioCuesEnabled((prev) => !prev)}>
