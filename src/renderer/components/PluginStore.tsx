@@ -22,7 +22,8 @@ export const PluginStore = ({ plugins, onReload, onToggle }: PluginStoreProps): 
             <h4>{plugin.manifest.name}</h4>
             <p>{plugin.manifest.description}</p>
             <small>
-              {plugin.manifest.entryCommand} | {plugin.manifest.permissionLevel}
+              {plugin.manifest.entryCommand} | {plugin.manifest.permissionLevel} | entry{" "}
+              {plugin.manifest.entry ?? "none"}
             </small>
             <div className="plugin-actions">
               <strong>{plugin.enabled ? "Enabled" : "Disabled"}</strong>

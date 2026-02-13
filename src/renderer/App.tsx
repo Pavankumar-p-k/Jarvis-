@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AgentType, AssistantState, MissionMode, MorningBriefing } from "../shared/contracts";
+import type {
+  AgentType,
+  AssistantState,
+  CreateCustomCommandInput,
+  MissionMode,
+  MorningBriefing,
+  UpdateCustomCommandInput,
+  VoiceEvent,
+  VoiceStatus
+} from "../shared/contracts";
 import { AgentTabs } from "./components/AgentTabs";
 import { AutomationBoard } from "./components/AutomationBoard";
+import { CustomCommandPanel } from "./components/CustomCommandPanel";
 import { HudBackground } from "./components/HudBackground";
 import { MissionModes } from "./components/MissionModes";
 import { PlannerPanel } from "./components/PlannerPanel";
@@ -10,6 +20,7 @@ import { ProcessMap } from "./components/ProcessMap";
 import { TelemetryPanel } from "./components/TelemetryPanel";
 import { VoiceOrb } from "./components/VoiceOrb";
 import { useMicLevel } from "./hooks/useMicLevel";
+import { useVoiceCapture } from "./hooks/useVoiceCapture";
 
 type TerminalLineKind = "command" | "reply" | "error" | "hint";
 
@@ -40,12 +51,16 @@ export const App = (): JSX.Element => {
   const [now, setNow] = useState<Date>(() => new Date());
   const [audioCuesEnabled, setAudioCuesEnabled] = useState(true);
   const [commandInput, setCommandInput] = useState("");
+  const [voiceSimulation, setVoiceSimulation] = useState("");
   const [resultMessage, setResultMessage] = useState("Ready.");
   const [pendingConfirmation, setPendingConfirmation] = useState<string | null>(null);
   const [activeAgent, setActiveAgent] = useState<AgentType>("scheduler");
   const [briefing, setBriefing] = useState<MorningBriefing | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const micLevel = useMicLevel();
+
+  useVoiceCapture(Boolean(voiceStatus?.enabled));
 
   const mode: MissionMode = state?.mode ?? "work";
   const commandCount = useMemo(() => state?.commandHistory.length ?? 0, [state]);
@@ -115,6 +130,51 @@ export const App = (): JSX.Element => {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+    let unsubscribe: () => void = () => {};
+
+    const handleVoiceEvent = (event: VoiceEvent): void => {
+      if (!mounted) {
+        return;
+      }
+      if (event.status) {
+        setVoiceStatus(event.status);
+      }
+      if (event.type === "wake") {
+        setResultMessage("Wake word detected. Listening for a command.");
+      }
+      if (event.type === "command" && event.command) {
+        setResultMessage(`Voice command: ${event.command}`);
+      }
+      if (event.type === "error" && event.message) {
+        setResultMessage(event.message);
+      }
+    };
+
+    const initVoice = async (): Promise<void> => {
+      try {
+        const status = await window.jarvisApi.getVoiceStatus();
+        if (mounted) {
+          setVoiceStatus(status);
+        }
+      } catch {
+        // Keep voice status null if API unavailable.
+      }
+
+      if (typeof window.jarvisApi?.onVoiceEvent === "function") {
+        unsubscribe = window.jarvisApi.onVoiceEvent(handleVoiceEvent);
+      }
+    };
+
+    void initVoice();
+
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
+  }, []);
+
   const runCommand = async (raw: string, bypassConfirmation = false): Promise<void> => {
     const command = raw.trim();
     if (!command || busy) {
@@ -139,6 +199,34 @@ export const App = (): JSX.Element => {
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleCreateCustomCommand = async (input: CreateCustomCommandInput): Promise<void> => {
+    const updated = await window.jarvisApi.createCustomCommand(input);
+    setState(updated);
+    setResultMessage(`Custom command "${input.name}" created.`);
+    playCue(700, 0.05);
+  };
+
+  const handleUpdateCustomCommand = async (
+    id: string,
+    updates: UpdateCustomCommandInput
+  ): Promise<void> => {
+    const updated = await window.jarvisApi.updateCustomCommand(id, updates);
+    setState(updated);
+    setResultMessage("Custom command updated.");
+    playCue(680, 0.05);
+  };
+
+  const handleDeleteCustomCommand = async (id: string): Promise<void> => {
+    const approved = window.confirm("Delete this custom command?");
+    if (!approved) {
+      return;
+    }
+    const updated = await window.jarvisApi.deleteCustomCommand(id);
+    setState(updated);
+    setResultMessage("Custom command deleted.");
+    playCue(320, 0.06);
   };
 
   const terminalLines = useMemo<TerminalLine[]>(() => {
@@ -281,7 +369,7 @@ export const App = (): JSX.Element => {
               <input
                 value={commandInput}
                 onChange={(event) => setCommandInput(event.target.value)}
-                placeholder="open chrome | remind me in 20m | /mode focus | /ask summarize pending tasks"
+                placeholder="open chrome | start sprint | /mode focus | /ask summarize pending tasks"
               />
               <button type="submit" disabled={busy}>
                 Execute
@@ -305,9 +393,44 @@ export const App = (): JSX.Element => {
             <section className="panel orb-panel">
               <header className="panel-title">
                 <span>VOICE</span>
-                <span>INPUT</span>
+                <button
+                  className="mini-btn"
+                  type="button"
+                  onClick={async () => {
+                    const next = await window.jarvisApi.setVoiceEnabled(!voiceStatus?.enabled);
+                    setVoiceStatus(next);
+                    setResultMessage(`Voice listening ${next.enabled ? "enabled" : "disabled"}.`);
+                  }}
+                >
+                  {voiceStatus?.enabled ? "Disable" : "Enable"}
+                </button>
               </header>
               <VoiceOrb level={micLevel} mode={state.mode} />
+              <div className="voice-status-grid">
+                <small>Wake word: {voiceStatus?.wakeWord ?? "jarvis"}</small>
+                <small>Backend: {voiceStatus?.backend ?? "stub"}</small>
+                <small>Queue: {voiceStatus?.pendingAudioChunks ?? 0}</small>
+              </div>
+              <form
+                className="voice-sim-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!voiceSimulation.trim()) {
+                    return;
+                  }
+                  void window.jarvisApi.simulateVoiceTranscript(voiceSimulation.trim());
+                  setVoiceSimulation("");
+                }}
+              >
+                <input
+                  value={voiceSimulation}
+                  onChange={(event) => setVoiceSimulation(event.target.value)}
+                  placeholder="simulate transcript (debug)"
+                />
+                <button type="submit" className="mini-btn">
+                  Inject
+                </button>
+              </form>
             </section>
             <AgentTabs
               activeAgent={activeAgent}
@@ -375,6 +498,15 @@ export const App = (): JSX.Element => {
                 setState(updated);
                 setResultMessage(`Automation ${enabled ? "enabled" : "disabled"}.`);
                 playCue(enabled ? 730 : 320, 0.05);
+              }}
+            />
+            <CustomCommandPanel
+              commands={state.customCommands}
+              onCreate={handleCreateCustomCommand}
+              onUpdate={handleUpdateCustomCommand}
+              onDelete={handleDeleteCustomCommand}
+              onRun={(trigger) => {
+                void runCommand(trigger);
               }}
             />
             <PluginStore
