@@ -51,9 +51,28 @@ interface WavMeta {
 type UnknownRecord = Record<string, unknown>;
 
 const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
+const normalizeSpeechText = (value: string): string =>
+  normalizeText(value)
+    .replace(/[“”]/g, "\"")
+    .replace(/[’]/g, "'")
+    .replace(/[.,!?;:]+$/g, "")
+    .trim();
 const toFiniteOr = (value: unknown, fallback: number): number => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const recognitionFailure = (message: string | void): boolean => {
+  if (!message) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("not recognized") ||
+    lower.includes("not in launcher map") ||
+    lower.includes("routine not found") ||
+    lower.includes("unknown panel")
+  );
 };
 
 const getErrorMessage = (error: unknown): string => {
@@ -190,6 +209,8 @@ export class VoiceService {
   private chunkQueue: AudioChunk[] = [];
   private wakeHits = 0;
   private lastWakeAtMs = 0;
+  private lastPassiveTranscriptAtMs = 0;
+  private passiveListenIntervalMs = 1400;
 
   private status: VoiceStatus;
   private backend: VoiceBackend = "stub";
@@ -244,6 +265,7 @@ export class VoiceService {
     this.chunkQueue = [];
     this.wakeHits = 0;
     this.lastWakeAtMs = 0;
+    this.lastPassiveTranscriptAtMs = 0;
     this.status.enabled = false;
     this.status.listening = false;
     this.status.pendingAudioChunks = 0;
@@ -322,6 +344,7 @@ export class VoiceService {
       this.chunkQueue = [];
       this.status.pendingAudioChunks = 0;
       this.wakeHits = 0;
+      this.lastPassiveTranscriptAtMs = 0;
     }
 
     this.emitStatus();
@@ -395,6 +418,29 @@ export class VoiceService {
           const wakeDetected = this.detectWakeOnset(audioBuffer, now);
           if (wakeDetected) {
             this.armCommandWindow(now);
+            continue;
+          }
+
+          // Fallback path: periodically transcribe chunks to catch spoken wake-word when RMS gating fails.
+          // This is important for non-PCM streams where RMS cannot be derived reliably.
+          if (now - this.lastPassiveTranscriptAtMs < this.passiveListenIntervalMs) {
+            continue;
+          }
+          this.lastPassiveTranscriptAtMs = now;
+
+          const passiveTranscript = await this.transcribeAudio(audioBuffer, next.mimeType);
+          if (!passiveTranscript) {
+            continue;
+          }
+
+          const wakeCommand = this.extractWakeCommand(passiveTranscript);
+          if (wakeCommand === null) {
+            continue;
+          }
+
+          this.armCommandWindow(now);
+          if (wakeCommand) {
+            await this.processCommandTranscript(wakeCommand);
           }
           continue;
         }
@@ -466,7 +512,7 @@ export class VoiceService {
   }
 
   private async processCommandTranscript(rawTranscript: string): Promise<void> {
-    const transcript = normalizeText(rawTranscript);
+    const transcript = normalizeSpeechText(rawTranscript);
     if (!transcript) {
       return;
     }
@@ -474,10 +520,8 @@ export class VoiceService {
     this.status.lastTranscript = transcript;
     this.emitStatus();
 
-    const lower = transcript.toLowerCase();
-    const command = lower.startsWith(this.wakeWord)
-      ? normalizeText(transcript.slice(this.wakeWord.length))
-      : transcript;
+    const wakeCommand = this.extractWakeCommand(transcript);
+    const command = wakeCommand ?? transcript;
 
     if (!command) {
       return;
@@ -488,19 +532,30 @@ export class VoiceService {
   }
 
   private async dispatchCommand(command: string, transcript: string): Promise<void> {
-    const cleanCommand = normalizeText(command);
+    const cleanCommand = normalizeSpeechText(command);
     if (!cleanCommand) {
       return;
     }
 
     try {
-      const resultMessage = await this.onCommand(cleanCommand);
+      const candidates = this.buildCommandCandidates(cleanCommand);
+      let chosenCommand = candidates[0];
+      let resultMessage = await this.onCommand(chosenCommand);
+
+      for (let index = 1; index < candidates.length; index += 1) {
+        if (!recognitionFailure(resultMessage)) {
+          break;
+        }
+        chosenCommand = candidates[index];
+        resultMessage = await this.onCommand(chosenCommand);
+      }
+
       const message = typeof resultMessage === "string" ? resultMessage : undefined;
       this.emitEvent({
         type: "command",
         atIso: new Date().toISOString(),
         transcript,
-        command: cleanCommand,
+        command: chosenCommand,
         message,
         status: this.getStatus()
       });
@@ -519,6 +574,64 @@ export class VoiceService {
     }
 
     this.status.backend = this.backend;
+  }
+
+  private extractWakeCommand(transcript: string): string | null {
+    const normalized = normalizeSpeechText(transcript);
+    if (!normalized) {
+      return null;
+    }
+    const lower = normalized.toLowerCase();
+    const wakeIndex = lower.indexOf(this.wakeWord);
+    if (wakeIndex < 0) {
+      return null;
+    }
+    return normalizeSpeechText(normalized.slice(wakeIndex + this.wakeWord.length));
+  }
+
+  private buildCommandCandidates(command: string): string[] {
+    const normalized = normalizeSpeechText(command);
+    const lowered = normalized.toLowerCase();
+    const candidates = new Set<string>();
+    const add = (value: string): void => {
+      const clean = normalizeSpeechText(value);
+      if (clean) {
+        candidates.add(clean);
+      }
+    };
+
+    add(normalized);
+
+    // Strip filler words often present in speech transcripts.
+    add(
+      lowered
+        .replace(/^(please|jarvis|hey jarvis|okay jarvis|ok jarvis)\s+/i, "")
+        .replace(/^(can you|could you|would you)\s+/i, "")
+    );
+
+    // Spoken mode and ask commands.
+    const modeMatch = lowered.match(/^(set\s+)?mode\s+(work|gaming|focus|night)$/i);
+    if (modeMatch) {
+      add(`/mode ${modeMatch[2]}`);
+    }
+    const askMatch = lowered.match(/^ask\s+(.+)$/i);
+    if (askMatch) {
+      add(`/ask ${askMatch[1]}`);
+    }
+
+    // Spoken shell command support.
+    const cmdMatch = lowered.match(/^(run\s+)?(command|cmd)\s+(.+)$/i);
+    if (cmdMatch) {
+      add(`/cmd ${cmdMatch[3]}`);
+    }
+
+    // Common app-name normalizations from STT.
+    add(lowered.replace(/\bgoogle chrome\b/g, "chrome"));
+    add(lowered.replace(/\bvs code\b/g, "vscode"));
+    add(lowered.replace(/\bvisual studio code\b/g, "vscode"));
+    add(lowered.replace(/\bcrome\b/g, "chrome"));
+
+    return Array.from(candidates);
   }
 
   private loadWhisperAddon(): unknown | null {

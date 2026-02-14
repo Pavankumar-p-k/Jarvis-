@@ -135,6 +135,7 @@ export class JarvisRuntime {
   private readonly openExternalUrl?: (url: string) => Promise<void>;
   private readonly onCommandFeedback?: (event: CommandFeedbackEvent) => void;
   private strictOffline: boolean;
+  private lastTelemetryRefreshAtMs = 0;
   private state: AssistantState;
 
   constructor(options: RuntimeOptions) {
@@ -178,6 +179,7 @@ export class JarvisRuntime {
   }
 
   getState(): AssistantState {
+    this.refreshTelemetryIfDue();
     return clone(this.state);
   }
 
@@ -418,6 +420,26 @@ export class JarvisRuntime {
     }
 
     const lower = normalized.toLowerCase();
+    const cmdMatch = normalized.match(/^\/?cmd\s+(.+)$/i);
+    if (cmdMatch) {
+      const requiredPermission: PermissionLevel = "confirm";
+      if (this.guard.needsConfirmation(requiredPermission, bypassConfirmation)) {
+        return {
+          result: {
+            ok: false,
+            message: "Confirmation needed before running CMD command.",
+            needsConfirmation: true
+          },
+          state: this.getState()
+        };
+      }
+
+      const result = this.runCmdCommand(cmdMatch[1] ?? "");
+      this.recordCommand(normalized, "system_info", result, context.writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
     if (lower.startsWith("/mode ")) {
       const mode = lower.replace("/mode ", "").trim() as MissionMode;
       if (["work", "gaming", "focus", "night"].includes(mode)) {
@@ -615,7 +637,7 @@ export class JarvisRuntime {
 
     return {
       ok: false,
-      message: "Command not recognized. Try: open chrome, remind me in 10m, /mode focus"
+      message: "Command not recognized. Try: open chrome, remind me in 10m, /mode focus, /cmd dir"
     };
   }
 
@@ -693,6 +715,49 @@ export class JarvisRuntime {
     return { ok: false, message: "Unable to send media key on this system." };
   }
 
+  private runCmdCommand(raw: string): ActionResult {
+    const command = raw.trim();
+    if (!command) {
+      return { ok: false, message: "CMD command is empty." };
+    }
+
+    const result = spawnSync("cmd", ["/d", "/s", "/c", command], {
+      windowsHide: true,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024
+    });
+
+    const stdout = (result.stdout ?? "").toString().trim();
+    const stderr = (result.stderr ?? "").toString().trim();
+    const combined = [stdout, stderr].filter(Boolean).join("\n");
+    const compact = combined.replace(/\r?\n+/g, " | ").slice(0, 320);
+
+    if (result.status === 0) {
+      return {
+        ok: true,
+        message: compact ? `CMD OK: ${compact}` : "CMD command completed.",
+        data: {
+          code: 0,
+          command,
+          stdout,
+          stderr
+        }
+      };
+    }
+
+    const code = typeof result.status === "number" ? result.status : -1;
+    return {
+      ok: false,
+      message: compact ? `CMD failed (${code}): ${compact}` : `CMD failed (${code}).`,
+      data: {
+        code,
+        command,
+        stdout,
+        stderr
+      }
+    };
+  }
+
   private terminateProcessByPid(pid: number): ActionResult {
     if (!Number.isFinite(pid) || pid <= 0) {
       return { ok: false, message: "Invalid PID." };
@@ -751,6 +816,15 @@ export class JarvisRuntime {
 
   private refreshTelemetry(): void {
     this.state.telemetry = this.telemetryService.getSnapshot();
+    this.lastTelemetryRefreshAtMs = Date.now();
+  }
+
+  private refreshTelemetryIfDue(minIntervalMs = 1200): void {
+    const nowMs = Date.now();
+    if (nowMs - this.lastTelemetryRefreshAtMs < minIntervalMs) {
+      return;
+    }
+    this.refreshTelemetry();
   }
 
   private reconcileDeadlines(): void {

@@ -28,6 +28,8 @@ export interface TelemetrySnapshot {
   uptimeSec: number;
   networkRxKb: number;
   networkTxKb: number;
+  networkRxKbPerSec: number;
+  networkTxKbPerSec: number;
   topProcesses: ProcessInfo[];
   timestampIso: string;
 }

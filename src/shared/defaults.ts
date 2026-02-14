@@ -7,6 +7,8 @@ export const buildDefaultTelemetry = (): TelemetrySnapshot => ({
   uptimeSec: 0,
   networkRxKb: 0,
   networkTxKb: 0,
+  networkRxKbPerSec: 0,
+  networkTxKbPerSec: 0,
   topProcesses: [],
   timestampIso: new Date().toISOString()
 });

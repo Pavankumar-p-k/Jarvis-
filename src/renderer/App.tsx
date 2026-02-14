@@ -237,6 +237,17 @@ const dateStamp = (value: Date): string =>
     })
     .toUpperCase();
 
+const formatRate = (value: number): string => {
+  const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
+  if (safe >= 100) {
+    return `${Math.round(safe)} KB/s`;
+  }
+  if (safe >= 10) {
+    return `${safe.toFixed(1)} KB/s`;
+  }
+  return `${safe.toFixed(2)} KB/s`;
+};
+
 const BOOT_STAGES = [
   "INIT DISPLAY MATRIX",
   "MOUNT LOCAL STORAGE",
@@ -381,7 +392,7 @@ export const App = (): JSX.Element => {
     void sync();
     const timer = window.setInterval(() => {
       void sync();
-    }, 8000);
+    }, 2000);
     return () => {
       active = false;
       clearInterval(timer);
@@ -675,6 +686,17 @@ export const App = (): JSX.Element => {
     playCue(420, 0.05);
   };
 
+  const handleCopyResult = async (): Promise<void> => {
+    const text = `[${mode}] ${resultMessage}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      playCue(790, 0.04);
+    } catch {
+      playCue(180, 0.08);
+      setResultMessage("Copy failed.");
+    }
+  };
+
   const terminalLines = useMemo<TerminalLine[]>(() => {
     if (!state) {
       return localTerminalLines;
@@ -709,7 +731,15 @@ export const App = (): JSX.Element => {
     minute: "2-digit",
     second: "2-digit"
   });
-  const networkState = state.telemetry.networkRxKb + state.telemetry.networkTxKb > 0 ? "ONLINE" : "OFFLINE";
+  const rxRateKbPerSec = state.telemetry.networkRxKbPerSec ?? 0;
+  const txRateKbPerSec = state.telemetry.networkTxKbPerSec ?? 0;
+  const totalRateKbPerSec = rxRateKbPerSec + txRateKbPerSec;
+  const networkState =
+    totalRateKbPerSec > 0.2
+      ? "ONLINE"
+      : state.telemetry.networkRxKb + state.telemetry.networkTxKb > 0
+        ? "IDLE"
+        : "OFFLINE";
   const systemLines: TerminalLine[] = [
     { id: "sys-mode", kind: "hint", text: `[system] mode ${state.mode}` },
     { id: "sys-cpu", kind: "reply", text: `CPU ${state.telemetry.cpuPercent}%` },
@@ -858,7 +888,12 @@ export const App = (): JSX.Element => {
                           <p className="empty">No lines in this tab yet.</p>
                         )}
                       </div>
-                      <div className="result-line">[{mode}] {resultMessage}</div>
+                      <div className="result-line-wrap">
+                        <div className="result-line">[{mode}] {resultMessage}</div>
+                        <button type="button" className="mini-btn copy-result-btn" onClick={() => void handleCopyResult()}>
+                          Copy
+                        </button>
+                      </div>
                       <form
                         className="command-form terminal-form"
                         onSubmit={(event) => {
@@ -871,7 +906,7 @@ export const App = (): JSX.Element => {
                         <input
                           value={commandInput}
                           onChange={(event) => setCommandInput(event.target.value)}
-                          placeholder="open chrome | /mode focus | move network panel to right"
+                          placeholder="open chrome | /mode focus | /cmd dir | move network panel to right"
                         />
                         <button type="submit" disabled={busy}>
                           Execute
@@ -977,15 +1012,47 @@ export const App = (): JSX.Element => {
                           <strong>IPv4</strong>
                         </div>
                         <div>
-                          <label>PING</label>
-                          <strong>-- ms</strong>
+                          <label>RX RATE</label>
+                          <strong>{formatRate(rxRateKbPerSec)}</strong>
                         </div>
                         <div>
-                          <label>LINK</label>
-                          <strong>LOCAL</strong>
+                          <label>TX RATE</label>
+                          <strong>{formatRate(txRateKbPerSec)}</strong>
                         </div>
                       </div>
-                      <div className="network-globe">{networkState}</div>
+                      <div className="network-grid network-grid-secondary">
+                        <div>
+                          <label>LINK</label>
+                          <strong>{totalRateKbPerSec > 0.2 ? "ACTIVE" : "LOCAL"}</strong>
+                        </div>
+                        <div>
+                          <label>TOTAL</label>
+                          <strong>{formatRate(totalRateKbPerSec)}</strong>
+                        </div>
+                      </div>
+                      <div
+                        className="network-globe"
+                        style={
+                          {
+                            ["--net-intensity" as string]: Math.min(1, totalRateKbPerSec / 280)
+                          } as Record<string, string | number>
+                        }
+                      >
+                        <div className="network-globe-shell" aria-hidden="true">
+                          <span className="globe-ring ring-a" />
+                          <span className="globe-ring ring-b" />
+                          <span className="globe-ring ring-c" />
+                          <span className="globe-meridian meridian-a" />
+                          <span className="globe-meridian meridian-b" />
+                          <span className="globe-scan" />
+                          <span className="globe-blip blip-a" />
+                          <span className="globe-blip blip-b" />
+                        </div>
+                        <div className="network-globe-readout">
+                          <strong>{networkState}</strong>
+                          <small>{formatRate(totalRateKbPerSec)}</small>
+                        </div>
+                      </div>
                     </section>
                   );
                 }
