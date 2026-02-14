@@ -1047,7 +1047,7 @@ export class JarvisRuntime {
   private buildGreetingMessage(now: Date): string {
     const greeting = currentGreeting(now);
     const hhmm = toClockMinutes(now.getHours(), now.getMinutes());
-    return `${greeting}. Jarvis online. Current time ${hhmm}.`;
+    return `Wake up, daddy's home. ${greeting}. Jarvis online. Current time ${hhmm}.`;
   }
 
   private speakStartupGreetingIfNeeded(): void {
@@ -1070,21 +1070,36 @@ export class JarvisRuntime {
     }
 
     const safeText = text.replace(/'/g, "''");
-    try {
-      spawn(
-        "powershell",
-        [
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-Command",
-          `Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('${safeText}')`
-        ],
-        { detached: true, stdio: "ignore", windowsHide: true }
-      ).unref();
-    } catch {
-      // Speech output is optional; keep runtime operational if TTS is unavailable.
+    const systemSpeechScript =
+      `$ErrorActionPreference='Stop'; ` +
+      `Add-Type -AssemblyName System.Speech; ` +
+      `$s=New-Object System.Speech.Synthesis.SpeechSynthesizer; ` +
+      `$s.Rate=0; ` +
+      `$s.Speak('${safeText}');`;
+
+    const sapiScript =
+      `$ErrorActionPreference='Stop'; ` +
+      `$v=New-Object -ComObject SAPI.SpVoice; ` +
+      `$v.Rate=0; ` +
+      `[void]$v.Speak('${safeText}');`;
+
+    const trySpeak = (script: string): boolean => {
+      try {
+        const result = spawnSync(
+          "powershell",
+          ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+          { windowsHide: true, encoding: "utf8", timeout: 20_000 }
+        );
+        return result.status === 0;
+      } catch {
+        return false;
+      }
+    };
+
+    if (trySpeak(systemSpeechScript)) {
+      return;
     }
+    void trySpeak(sapiScript);
   }
 
   private terminateProcessByPid(pid: number): ActionResult {

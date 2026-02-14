@@ -267,6 +267,17 @@ const formatRate = (value: number): string => {
   return `${safe.toFixed(2)} KB/s`;
 };
 
+const daytimeGreeting = (at: Date): string => {
+  const hour = at.getHours();
+  if (hour < 12) {
+    return "Good morning";
+  }
+  if (hour < 17) {
+    return "Good afternoon";
+  }
+  return "Good evening";
+};
+
 const normalizeKeyLabel = (key: string): string => {
   const value = key.length === 1 ? key.toUpperCase() : key.toUpperCase();
   if (value === " ") {
@@ -347,6 +358,8 @@ export const App = (): JSX.Element => {
   const keyToneCooldownRef = useRef<number>(0);
   const keyReleaseTimersRef = useRef<Record<string, number>>({});
   const seenSuggestionIdsRef = useRef<Set<string>>(new Set());
+  const startupSpeechDoneRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const micLevel = useMicLevel();
 
   useVoiceCapture(Boolean(voiceStatus?.enabled));
@@ -401,7 +414,11 @@ export const App = (): JSX.Element => {
       return;
     }
     try {
-      const context = new window.AudioContext();
+      const context = audioContextRef.current ?? new window.AudioContext();
+      audioContextRef.current = context;
+      if (context.state === "suspended") {
+        void context.resume();
+      }
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = "triangle";
@@ -414,11 +431,27 @@ export const App = (): JSX.Element => {
       gain.gain.exponentialRampToValueAtTime(0.0001, start + durationSec);
       oscillator.start(start);
       oscillator.stop(start + durationSec);
-      oscillator.onended = () => {
-        void context.close();
-      };
     } catch {
       // Ignore WebAudio failures on restricted devices.
+    }
+  };
+
+  const speakFallback = (text: string): void => {
+    const clean = text.trim();
+    if (!clean) {
+      return;
+    }
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+    try {
+      const utterance = new SpeechSynthesisUtterance(clean);
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Ignore speech synthesis failures in restricted environments.
     }
   };
 
@@ -646,10 +679,26 @@ export const App = (): JSX.Element => {
 
     notices.forEach((notice, index) => {
       window.setTimeout(() => {
+        speakFallback(notice.text);
+      }, index * 280);
+      window.setTimeout(() => {
         setToastNotices((current) => current.filter((item) => item.id !== notice.id));
       }, 4600 + index * 200);
     });
   }, [state]);
+
+  useEffect(() => {
+    if (!bootComplete || !state || startupSpeechDoneRef.current) {
+      return;
+    }
+    startupSpeechDoneRef.current = true;
+    const timeText = now.toLocaleTimeString(undefined, {
+      hour12: true,
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    speakFallback(`Wake up, daddy's home. ${daytimeGreeting(now)}. Jarvis online. Current time ${timeText}.`);
+  }, [bootComplete, now, state]);
 
   const appendLocalTerminalLines = (command: string, message: string, ok: boolean): void => {
     const seed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
