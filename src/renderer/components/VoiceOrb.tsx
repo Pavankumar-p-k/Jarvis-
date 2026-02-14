@@ -46,6 +46,11 @@ export const VoiceOrb = ({ level, mode, voiceStatus }: VoiceOrbProps): JSX.Eleme
     const value = 0.2 + wave * talkBoost;
     return value;
   });
+  const neurons = Array.from({ length: 12 }, (_item, index) => ({
+    id: index,
+    angle: (360 / 12) * index,
+    orbit: 42 + (index % 4) * 16
+  }));
 
   return (
     <div
@@ -61,6 +66,21 @@ export const VoiceOrb = ({ level, mode, voiceStatus }: VoiceOrbProps): JSX.Eleme
       <div className="orb-grid" />
       <div className="orb-halo" />
       <div className="orb-scanline" />
+      <div className="orb-neurons" aria-hidden="true">
+        {neurons.map((node) => (
+          <span
+            key={`neuron-${node.id}`}
+            className="orb-neuron"
+            style={
+              {
+                ["--node-angle" as string]: `${node.angle}deg`,
+                ["--node-orbit" as string]: `${node.orbit}px`,
+                ["--node-index" as string]: node.id
+              } as Record<string, string | number>
+            }
+          />
+        ))}
+      </div>
       <div className="orb-eq" aria-hidden="true">
         {eqBars.map((value, index) => (
           <span

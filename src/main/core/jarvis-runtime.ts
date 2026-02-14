@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   ActionResult,
@@ -10,6 +11,7 @@ import type {
   CommandResponse,
   CreateCustomCommandInput,
   CustomCommand,
+  DirectoryEntry,
   LlmRuntimeOptions,
   LlmRuntimeOptionsUpdate,
   MissionMode,
@@ -59,6 +61,20 @@ interface DispatchContext {
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 const normalizeSpaces = (value: string): string => value.trim().replace(/\s+/g, " ");
+
+const toClockMinutes = (hours: number, minutes: number): string =>
+  `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+
+const currentGreeting = (at: Date): string => {
+  const hour = at.getHours();
+  if (hour < 12) {
+    return "Good morning";
+  }
+  if (hour < 17) {
+    return "Good afternoon";
+  }
+  return "Good evening";
+};
 
 const defaultRoutines = (): RoutineItem[] => [
   {
@@ -136,6 +152,8 @@ export class JarvisRuntime {
   private readonly onCommandFeedback?: (event: CommandFeedbackEvent) => void;
   private strictOffline: boolean;
   private lastTelemetryRefreshAtMs = 0;
+  private shellCwd = process.cwd();
+  private startupGreetingSpoken = false;
   private state: AssistantState;
 
   constructor(options: RuntimeOptions) {
@@ -153,6 +171,15 @@ export class JarvisRuntime {
     const loaded = this.stateStore.read(buildDefaultState());
     this.state = loaded;
 
+    if (!this.state.shell || typeof this.state.shell.currentDirectory !== "string") {
+      this.state.shell = {
+        currentDirectory: process.cwd(),
+        entries: []
+      };
+    }
+    this.shellCwd = this.resolveDirectory(this.state.shell.currentDirectory) ?? process.cwd();
+    this.syncShellState();
+
     if (!Array.isArray(this.state.routines) || this.state.routines.length === 0) {
       this.state.routines = defaultRoutines();
     }
@@ -167,11 +194,13 @@ export class JarvisRuntime {
     this.refreshTelemetry();
     this.saveState();
 
+    this.speakStartupGreetingIfNeeded();
+
     this.scheduler.start(() => {
       this.refreshTelemetry();
       this.reconcileDeadlines();
       this.saveState();
-    }, 15_000);
+    }, 5_000);
   }
 
   destroy(): void {
@@ -420,21 +449,132 @@ export class JarvisRuntime {
     }
 
     const lower = normalized.toLowerCase();
+
+    if (lower === "/time" || lower === "time" || lower === "what time is it") {
+      const now = new Date();
+      const message = `${currentGreeting(now)}. Current time is ${now.toLocaleTimeString()}.`;
+      const result: ActionResult = { ok: true, message };
+      this.recordCommand(normalized, "system_info", result, context.writeHistory);
+      this.saveState();
+      void this.speakText(message);
+      return { result, state: this.getState() };
+    }
+
+    if (lower === "/greet" || lower === "start jarvis" || lower === "jarvis start") {
+      const message = this.buildGreetingMessage(new Date());
+      const result: ActionResult = { ok: true, message };
+      this.recordCommand(normalized, "system_info", result, context.writeHistory);
+      this.saveState();
+      void this.speakText(message);
+      return { result, state: this.getState() };
+    }
+
+    const remindMatch = normalized.match(/^\/?remind\s+(\d+)\s+(.+)$/i);
+    if (remindMatch) {
+      const minutes = Math.max(1, Number(remindMatch[1] ?? "15"));
+      const title = (remindMatch[2] ?? "Reminder").trim();
+      const reminder = this.createReminder({
+        title,
+        delayMinutes: String(minutes)
+      });
+      this.state.reminders.unshift(reminder);
+      this.pushSuggestion(`Reminder added: ${reminder.title}`, "Planner");
+      const result: ActionResult = {
+        ok: true,
+        message: `Reminder set for ${new Date(reminder.dueAtIso).toLocaleString()}`
+      };
+      this.recordCommand(normalized, "set_reminder", result, context.writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
+    const alarmMatch = normalized.match(/^\/?alarm\s+(\d{1,2}):(\d{2})(?:\s+(.+))?$/i);
+    if (alarmMatch) {
+      const atHour = Number(alarmMatch[1] ?? "0");
+      const atMinute = Number(alarmMatch[2] ?? "0");
+      if (atHour < 0 || atHour > 23 || atMinute < 0 || atMinute > 59) {
+        const result: ActionResult = { ok: false, message: "Alarm format invalid. Use /alarm HH:MM [label]." };
+        this.recordCommand(normalized, "set_alarm", result, context.writeHistory);
+        return { result, state: this.getState() };
+      }
+
+      const alarm = this.createAlarm({
+        label: (alarmMatch[3] ?? "Alarm").trim() || "Alarm",
+        atHour: String(atHour),
+        atMinute: String(atMinute)
+      });
+      this.state.alarms.unshift(alarm);
+      this.pushSuggestion(`Alarm scheduled: ${alarm.label}`, "Planner");
+      const result: ActionResult = {
+        ok: true,
+        message: `Alarm set for ${new Date(alarm.triggerAtIso).toLocaleString()}`
+      };
+      this.recordCommand(normalized, "set_alarm", result, context.writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
+    const cdMatch = normalized.match(/^\/?cd(?:\s+(.+))?$/i);
+    if (cdMatch) {
+      const result = this.changeDirectory(cdMatch[1] ?? "");
+      this.recordCommand(normalized, "system_info", result, context.writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
+    if (/^\/?(pwd|cwd)$/i.test(normalized)) {
+      this.syncShellState();
+      const result: ActionResult = {
+        ok: true,
+        message: `Current directory: ${this.shellCwd}`
+      };
+      this.recordCommand(normalized, "system_info", result, context.writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
+    const listMatch = normalized.match(/^\/?(ls|dir)(?:\s+(.+))?$/i);
+    if (listMatch) {
+      const target = (listMatch[2] ?? "").trim();
+      const dir = target ? this.resolveDirectory(target) : this.shellCwd;
+      if (!dir) {
+        const result: ActionResult = { ok: false, message: `Directory not found: ${target}` };
+        this.recordCommand(normalized, "system_info", result, context.writeHistory);
+        return { result, state: this.getState() };
+      }
+      this.shellCwd = dir;
+      this.syncShellState();
+      const preview = this.state.shell.entries
+        .slice(0, 10)
+        .map((item) => `${item.kind === "directory" ? "[D]" : "[F]"} ${item.name}`)
+        .join(" | ");
+      const result: ActionResult = {
+        ok: true,
+        message: preview ? `Listing ${dir}: ${preview}` : `Listing ${dir}: empty`
+      };
+      this.recordCommand(normalized, "system_info", result, context.writeHistory);
+      this.saveState();
+      return { result, state: this.getState() };
+    }
+
     const cmdMatch = normalized.match(/^\/?cmd\s+(.+)$/i);
-    if (cmdMatch) {
+    const psMatch = normalized.match(/^\/?(?:ps|powershell|pwsh)\s+(.+)$/i);
+    if (cmdMatch || psMatch) {
       const requiredPermission: PermissionLevel = "confirm";
       if (this.guard.needsConfirmation(requiredPermission, bypassConfirmation)) {
         return {
           result: {
             ok: false,
-            message: "Confirmation needed before running CMD command.",
+            message: "Confirmation needed before running shell command.",
             needsConfirmation: true
           },
           state: this.getState()
         };
       }
 
-      const result = this.runCmdCommand(cmdMatch[1] ?? "");
+      const result = cmdMatch
+        ? this.runCmdCommand(cmdMatch[1] ?? "")
+        : this.runPowerShellCommand(psMatch?.[1] ?? "");
       this.recordCommand(normalized, "system_info", result, context.writeHistory);
       this.saveState();
       return { result, state: this.getState() };
@@ -637,7 +777,7 @@ export class JarvisRuntime {
 
     return {
       ok: false,
-      message: "Command not recognized. Try: open chrome, remind me in 10m, /mode focus, /cmd dir"
+      message: "Command not recognized. Try: open chrome, /mode focus, /cmd dir, /ps Get-Date, /cd C:\\"
     };
   }
 
@@ -724,13 +864,15 @@ export class JarvisRuntime {
     const result = spawnSync("cmd", ["/d", "/s", "/c", command], {
       windowsHide: true,
       encoding: "utf8",
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      cwd: this.shellCwd
     });
 
     const stdout = (result.stdout ?? "").toString().trim();
     const stderr = (result.stderr ?? "").toString().trim();
-    const combined = [stdout, stderr].filter(Boolean).join("\n");
-    const compact = combined.replace(/\r?\n+/g, " | ").slice(0, 320);
+    const compact = this.compactShellOutput(stdout, stderr);
+
+    this.syncShellState();
 
     if (result.status === 0) {
       return {
@@ -756,6 +898,193 @@ export class JarvisRuntime {
         stderr
       }
     };
+  }
+
+  private runPowerShellCommand(raw: string): ActionResult {
+    const command = raw.trim();
+    if (!command) {
+      return { ok: false, message: "PowerShell command is empty." };
+    }
+
+    const result = spawnSync(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+      {
+        windowsHide: true,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        cwd: this.shellCwd
+      }
+    );
+
+    const stdout = (result.stdout ?? "").toString().trim();
+    const stderr = (result.stderr ?? "").toString().trim();
+    const compact = this.compactShellOutput(stdout, stderr);
+
+    this.syncShellState();
+
+    if (result.status === 0) {
+      return {
+        ok: true,
+        message: compact ? `PS OK: ${compact}` : "PowerShell command completed.",
+        data: {
+          code: 0,
+          command,
+          stdout,
+          stderr
+        }
+      };
+    }
+
+    const code = typeof result.status === "number" ? result.status : -1;
+    return {
+      ok: false,
+      message: compact ? `PS failed (${code}): ${compact}` : `PS failed (${code}).`,
+      data: {
+        code,
+        command,
+        stdout,
+        stderr
+      }
+    };
+  }
+
+  private compactShellOutput(stdout: string, stderr: string): string {
+    return [stdout, stderr]
+      .filter(Boolean)
+      .join("\n")
+      .replace(/\r?\n+/g, " | ")
+      .slice(0, 320);
+  }
+
+  private changeDirectory(rawPath: string): ActionResult {
+    const next = this.resolveDirectory(rawPath);
+    if (!next) {
+      return {
+        ok: false,
+        message: rawPath ? `Directory not found: ${rawPath}` : "Directory not found."
+      };
+    }
+
+    this.shellCwd = next;
+    this.syncShellState();
+    return {
+      ok: true,
+      message: `Directory changed to ${this.shellCwd}`
+    };
+  }
+
+  private resolveDirectory(rawPath: string): string | null {
+    const input = (rawPath || "").trim();
+    const target = !input || input === "~" ? process.cwd() : input;
+    const result = spawnSync("powershell", ["-NoProfile", "-Command", `(Resolve-Path -LiteralPath '${target.replace(/'/g, "''")}').Path`], {
+      windowsHide: true,
+      encoding: "utf8",
+      cwd: this.shellCwd
+    });
+
+    if (result.status !== 0) {
+      return null;
+    }
+
+    const resolved = (result.stdout ?? "").toString().trim().split(/\r?\n/)[0]?.trim();
+    if (!resolved) {
+      return null;
+    }
+
+    try {
+      if (!statSync(resolved).isDirectory()) {
+        return null;
+      }
+      return resolved;
+    } catch {
+      return null;
+    }
+  }
+
+  private syncShellState(): void {
+    this.state.shell.currentDirectory = this.shellCwd;
+    this.state.shell.entries = this.readDirectoryEntries(this.shellCwd);
+  }
+
+  private readDirectoryEntries(dir: string): DirectoryEntry[] {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .map((entry) => {
+          const name = entry.name;
+          if (entry.isDirectory()) {
+            return {
+              name,
+              kind: "directory"
+            } satisfies DirectoryEntry;
+          }
+
+          let sizeKb = 0;
+          try {
+            sizeKb = Math.max(0, Math.round(statSync(join(dir, name)).size / 1024));
+          } catch {
+            sizeKb = 0;
+          }
+
+          return {
+            name,
+            kind: "file",
+            sizeKb
+          } satisfies DirectoryEntry;
+        })
+        .sort((a, b) => {
+          if (a.kind !== b.kind) {
+            return a.kind === "directory" ? -1 : 1;
+          }
+          return a.name.localeCompare(b.name);
+        })
+        .slice(0, 120);
+    } catch {
+      return [];
+    }
+  }
+
+  private buildGreetingMessage(now: Date): string {
+    const greeting = currentGreeting(now);
+    const hhmm = toClockMinutes(now.getHours(), now.getMinutes());
+    return `${greeting}. Jarvis online. Current time ${hhmm}.`;
+  }
+
+  private speakStartupGreetingIfNeeded(): void {
+    if (this.startupGreetingSpoken) {
+      return;
+    }
+    this.startupGreetingSpoken = true;
+    void this.speakText(this.buildGreetingMessage(new Date()));
+  }
+
+  private async speakText(text: string): Promise<void> {
+    if (!text.trim()) {
+      return;
+    }
+    if (process.env.VITEST) {
+      return;
+    }
+    if (process.env.JARVIS_TTS === "0") {
+      return;
+    }
+
+    const safeText = text.replace(/'/g, "''");
+    try {
+      spawn(
+        "powershell",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('${safeText}')`
+        ],
+        { detached: true, stdio: "ignore", windowsHide: true }
+      ).unref();
+    } catch {
+      // Speech output is optional; keep runtime operational if TTS is unavailable.
+    }
   }
 
   private terminateProcessByPid(pid: number): ActionResult {
@@ -830,15 +1159,20 @@ export class JarvisRuntime {
   private reconcileDeadlines(): void {
     const now = Date.now();
     for (const reminder of this.state.reminders) {
-      if (reminder.status === "pending" && Date.parse(reminder.dueAtIso) < now - 60_000) {
+      if (reminder.status === "pending" && Date.parse(reminder.dueAtIso) <= now) {
         reminder.status = "missed";
+        const text = `Reminder due: ${reminder.title}`;
+        this.pushSuggestion(text, "Planner");
+        void this.speakText(text);
       }
     }
 
     for (const alarm of this.state.alarms) {
       if (alarm.enabled && Date.parse(alarm.triggerAtIso) <= now) {
         alarm.enabled = false;
-        this.pushSuggestion(`Alarm triggered: ${alarm.label}`, "Alarm");
+        const text = `Alarm triggered: ${alarm.label}`;
+        this.pushSuggestion(text, "Alarm");
+        void this.speakText(text);
       }
     }
   }
@@ -895,6 +1229,7 @@ export class JarvisRuntime {
 
   private saveState(): void {
     this.state.customCommands = this.customCommandService.list();
+    this.syncShellState();
     this.stateStore.write(this.state);
   }
 

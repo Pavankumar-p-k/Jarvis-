@@ -1,4 +1,5 @@
-import type { AssistantState, MemoryProfile, TelemetrySnapshot } from "./contracts";
+import { cwd } from "node:process";
+import type { AssistantState, MemoryProfile, ShellState, TelemetrySnapshot } from "./contracts";
 
 export const buildDefaultTelemetry = (): TelemetrySnapshot => ({
   cpuPercent: 0,
@@ -20,9 +21,15 @@ export const buildDefaultMemory = (): MemoryProfile => ({
   updatedAtIso: new Date().toISOString()
 });
 
+export const buildDefaultShell = (): ShellState => ({
+  currentDirectory: cwd(),
+  entries: []
+});
+
 export const buildDefaultState = (): AssistantState => ({
   mode: "work",
   telemetry: buildDefaultTelemetry(),
+  shell: buildDefaultShell(),
   reminders: [],
   alarms: [],
   routines: [],

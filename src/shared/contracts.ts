@@ -41,6 +41,17 @@ export interface ProcessInfo {
   cpuPercent?: number;
 }
 
+export interface DirectoryEntry {
+  name: string;
+  kind: "file" | "directory";
+  sizeKb?: number;
+}
+
+export interface ShellState {
+  currentDirectory: string;
+  entries: DirectoryEntry[];
+}
+
 export interface ReminderItem {
   id: string;
   title: string;
@@ -268,6 +279,7 @@ export interface BackendRuntimeOptionsUpdate {
 export interface AssistantState {
   mode: MissionMode;
   telemetry: TelemetrySnapshot;
+  shell: ShellState;
   reminders: ReminderItem[];
   alarms: AlarmItem[];
   routines: RoutineItem[];

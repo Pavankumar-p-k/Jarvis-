@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import type {
   AgentType,
   AssistantState,
@@ -35,6 +35,11 @@ interface TerminalLine {
   text: string;
 }
 
+interface ToastNotice {
+  id: string;
+  text: string;
+}
+
 type TerminalTabId = "main" | "2" | "3" | "4" | "5";
 
 type PanelColumn = "left" | "center" | "right";
@@ -53,7 +58,8 @@ type PanelId =
   | "customCommands"
   | "plugins"
   | "processes"
-  | "briefing";
+  | "briefing"
+  | "filesystem";
 
 type PanelOrder = Record<PanelColumn, PanelId[]>;
 
@@ -73,13 +79,24 @@ const PANEL_DEFAULT_COLUMN: Record<PanelId, PanelColumn> = {
   customCommands: "right",
   plugins: "right",
   processes: "right",
-  briefing: "right"
+  briefing: "right",
+  filesystem: "right"
 };
 
 const DEFAULT_PANEL_ORDER: PanelOrder = {
   left: ["clock", "telemetry", "mission"],
   center: ["terminal", "voice", "agents"],
-  right: ["network", "planner", "automation", "backend", "customCommands", "plugins", "processes", "briefing"]
+  right: [
+    "network",
+    "filesystem",
+    "planner",
+    "automation",
+    "backend",
+    "customCommands",
+    "plugins",
+    "processes",
+    "briefing"
+  ]
 };
 
 const PANEL_LABEL: Record<PanelId, string> = {
@@ -96,7 +113,8 @@ const PANEL_LABEL: Record<PanelId, string> = {
   customCommands: "Commands",
   plugins: "Plugins",
   processes: "Processes",
-  briefing: "Briefing"
+  briefing: "Briefing",
+  filesystem: "Folders"
 };
 
 const PANEL_ALIASES: Record<PanelId, string[]> = {
@@ -113,7 +131,8 @@ const PANEL_ALIASES: Record<PanelId, string[]> = {
   customCommands: ["custom commands", "commands", "command editor"],
   plugins: ["plugins", "plugin", "plugin store"],
   processes: ["process", "processes", "process map"],
-  briefing: ["briefing", "morning briefing"]
+  briefing: ["briefing", "morning briefing"],
+  filesystem: ["files", "folders", "folder", "directory", "filesystem"]
 };
 
 const TERMINAL_TABS: Array<{ id: TerminalTabId; label: string }> = [
@@ -248,6 +267,41 @@ const formatRate = (value: number): string => {
   return `${safe.toFixed(2)} KB/s`;
 };
 
+const normalizeKeyLabel = (key: string): string => {
+  const value = key.length === 1 ? key.toUpperCase() : key.toUpperCase();
+  if (value === " ") {
+    return "SPACE";
+  }
+  if (value === "BACKSPACE") {
+    return "BACK";
+  }
+  if (value === "CONTROL") {
+    return "CTRL";
+  }
+  if (value === "ALTGRAPH") {
+    return "ALT GR";
+  }
+  if (value === "ARROWUP") {
+    return "UP";
+  }
+  if (value === "ARROWDOWN") {
+    return "DOWN";
+  }
+  if (value === "ARROWLEFT") {
+    return "LEFT";
+  }
+  if (value === "ARROWRIGHT") {
+    return "RIGHT";
+  }
+  if (value === "ESCAPE") {
+    return "ESC";
+  }
+  if (value === "CAPSLOCK") {
+    return "CAPS";
+  }
+  return value;
+};
+
 const BOOT_STAGES = [
   "INIT DISPLAY MATRIX",
   "MOUNT LOCAL STORAGE",
@@ -287,12 +341,25 @@ export const App = (): JSX.Element => {
   const [localTerminalLines, setLocalTerminalLines] = useState<TerminalLine[]>([]);
   const [panelOrder, setPanelOrder] = useState<PanelOrder>(() => loadPanelOrder());
   const [draggedPanelId, setDraggedPanelId] = useState<PanelId | null>(null);
+  const [activeKeys, setActiveKeys] = useState<string[]>([]);
+  const [toastNotices, setToastNotices] = useState<ToastNotice[]>([]);
+  const stageToneRef = useRef<string>("");
+  const keyToneCooldownRef = useRef<number>(0);
+  const keyReleaseTimersRef = useRef<Record<string, number>>({});
+  const seenSuggestionIdsRef = useRef<Set<string>>(new Set());
   const micLevel = useMicLevel();
 
   useVoiceCapture(Boolean(voiceStatus?.enabled));
 
   const mode: MissionMode = state?.mode ?? "work";
   const commandCount = useMemo(() => state?.commandHistory.length ?? 0, [state]);
+  const panelRevealDelayMs = useMemo<Record<PanelId, number>>(() => {
+    const order = [...DEFAULT_PANEL_ORDER.left, ...DEFAULT_PANEL_ORDER.center, ...DEFAULT_PANEL_ORDER.right];
+    return order.reduce<Record<PanelId, number>>((acc, panelId, index) => {
+      acc[panelId] = 3000 + ((index * 673) % 5000);
+      return acc;
+    }, {} as Record<PanelId, number>);
+  }, []);
 
   useEffect(() => {
     const startedAt = Date.now();
@@ -354,6 +421,54 @@ export const App = (): JSX.Element => {
       // Ignore WebAudio failures on restricted devices.
     }
   };
+
+  useEffect(() => {
+    if (bootComplete) {
+      return;
+    }
+    if (stageToneRef.current === bootStage) {
+      return;
+    }
+    stageToneRef.current = bootStage;
+    const stageIndex = BOOT_STAGES.indexOf(bootStage);
+    const tone = 360 + Math.max(0, stageIndex) * 55;
+    playCue(tone, 0.045);
+  }, [bootComplete, bootStage]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const label = normalizeKeyLabel(event.key);
+      if (!label) {
+        return;
+      }
+      setActiveKeys((current) => (current.includes(label) ? current : [...current, label]));
+
+      const existing = keyReleaseTimersRef.current[label];
+      if (existing) {
+        clearTimeout(existing);
+      }
+      keyReleaseTimersRef.current[label] = window.setTimeout(() => {
+        setActiveKeys((current) => current.filter((item) => item !== label));
+        delete keyReleaseTimersRef.current[label];
+      }, 160);
+
+      const nowMs = Date.now();
+      if (nowMs - keyToneCooldownRef.current > 28 && audioCuesEnabled) {
+        const base = 420 + (label.charCodeAt(0) % 7) * 18;
+        playCue(base, 0.018);
+        keyToneCooldownRef.current = nowMs;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      Object.values(keyReleaseTimersRef.current).forEach((timerId) => {
+        clearTimeout(timerId);
+      });
+      keyReleaseTimersRef.current = {};
+    };
+  }, [audioCuesEnabled]);
 
   const refreshState = async (): Promise<void> => {
     if (typeof window.jarvisApi?.getState !== "function") {
@@ -504,6 +619,37 @@ export const App = (): JSX.Element => {
       // Ignore storage failures in restricted environments.
     }
   }, [panelOrder]);
+
+  useEffect(() => {
+    if (!state) {
+      return;
+    }
+
+    const seen = seenSuggestionIdsRef.current;
+    const fresh = state.suggestions.filter((item) => {
+      if (seen.has(item.id)) {
+        return false;
+      }
+      seen.add(item.id);
+      return item.reason === "Alarm" || item.reason === "Planner";
+    });
+
+    if (fresh.length === 0) {
+      return;
+    }
+
+    const notices = fresh.slice(0, 3).map<ToastNotice>((item) => ({
+      id: item.id,
+      text: item.text
+    }));
+    setToastNotices((current) => [...current, ...notices].slice(-5));
+
+    notices.forEach((notice, index) => {
+      window.setTimeout(() => {
+        setToastNotices((current) => current.filter((item) => item.id !== notice.id));
+      }, 4600 + index * 200);
+    });
+  }, [state]);
 
   const appendLocalTerminalLines = (command: string, message: string, ok: boolean): void => {
     const seed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -906,7 +1052,7 @@ export const App = (): JSX.Element => {
                         <input
                           value={commandInput}
                           onChange={(event) => setCommandInput(event.target.value)}
-                          placeholder="open chrome | /mode focus | /cmd dir | move network panel to right"
+                          placeholder="open chrome | /mode focus | /cmd dir | /ps Get-Date | move network panel to right"
                         />
                         <button type="submit" disabled={busy}>
                           Execute
@@ -1056,6 +1202,72 @@ export const App = (): JSX.Element => {
                     </section>
                   );
                 }
+                if (panelId === "filesystem") {
+                  return (
+                    <section className="panel filesystem-panel">
+                      <header className="panel-title">
+                        <span>FILE SYSTEM</span>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          onClick={() => {
+                            void runCommand("ls", true);
+                          }}
+                        >
+                          Refresh
+                        </button>
+                      </header>
+                      <div className="filesystem-path">{state.shell.currentDirectory}</div>
+                      <div className="filesystem-actions">
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          onClick={() => {
+                            void runCommand("cd ..", true);
+                          }}
+                        >
+                          Up
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          onClick={() => {
+                            void runCommand("pwd", true);
+                          }}
+                        >
+                          Pwd
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          onClick={() => {
+                            void runCommand("dir", true);
+                          }}
+                        >
+                          Dir
+                        </button>
+                      </div>
+                      <div className="filesystem-list">
+                        {state.shell.entries.length === 0 && <p className="empty">No entries loaded.</p>}
+                        {state.shell.entries.slice(0, 30).map((entry) => (
+                          <button
+                            key={`${entry.kind}-${entry.name}`}
+                            type="button"
+                            className={`filesystem-entry ${entry.kind}`}
+                            onClick={() => {
+                              if (entry.kind === "directory") {
+                                void runCommand(`cd "${entry.name}"`, true);
+                              }
+                            }}
+                          >
+                            <span>{entry.kind === "directory" ? "[D]" : "[F]"} {entry.name}</span>
+                            <small>{entry.kind === "file" ? `${entry.sizeKb ?? 0} KB` : "folder"}</small>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  );
+                }
                 if (panelId === "planner") {
                   return (
                     <PlannerPanel
@@ -1160,6 +1372,7 @@ export const App = (): JSX.Element => {
                 <div
                   key={panelId}
                   className={`panel-slot ${draggedPanelId === panelId ? "is-dragging" : ""}`}
+                  style={{ animationDelay: `${panelRevealDelayMs[panelId] ?? 3000}ms` }}
                   onDragOver={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -1195,34 +1408,92 @@ export const App = (): JSX.Element => {
         ))}
       </main>
 
-      <footer className="panel-frame hud-footer">
-        <div className="footer-kbd">
-          {KEYBOARD_LAYOUT.map((row, rowIndex) => (
-            <div key={`row-${rowIndex}`} className="kbd-row">
-              {row.map((key, keyIndex) => (
-                <span
-                  key={`${rowIndex}-${keyIndex}-${key}`}
-                  className={[
-                    key === "SPACE" ? "wide space" : "",
-                    key === "BACK" ? "wide back" : "",
-                    key === "ENTER" ? "wide enter" : "",
-                    key === "TAB" ? "wide tab" : "",
-                    key === "CAPS" ? "wide caps" : "",
-                    key === "SHIFT" ? "wide shift" : "",
-                    key === "BLANK" ? "blank" : ""
-                  ]
-                    .filter(Boolean)
-                    .join(" ") || undefined}
-                >
-                  {key === "BLANK" ? "" : key}
-                </span>
-              ))}
+      {toastNotices.length > 0 && (
+        <div className="toast-stack" aria-live="polite">
+          {toastNotices.map((toast) => (
+            <div key={toast.id} className="toast-item">
+              {toast.text}
             </div>
           ))}
         </div>
-        <button className="mini-btn" onClick={() => setAudioCuesEnabled((prev) => !prev)}>
-          Audio {audioCuesEnabled ? "ON" : "OFF"}
-        </button>
+      )}
+
+      <footer className="panel-frame hud-footer">
+        <div className="footer-kbd iron-kbd-shell">
+          <div className="iron-kbd-armor armor-a" />
+          <div className="iron-kbd-armor armor-b" />
+          <div className="iron-kbd-armor armor-c" />
+          <div className="iron-kbd-reactor">
+            <span className="reactor-ring ring-1" />
+            <span className="reactor-ring ring-2" />
+            <span className="reactor-ring ring-3" />
+            <span className="reactor-spoke spoke-a" />
+            <span className="reactor-spoke spoke-b" />
+            <span className="reactor-spoke spoke-c" />
+            <span className="reactor-spoke spoke-d" />
+            <span className="reactor-core-light" />
+          </div>
+          <div className="iron-kbd-mark">STARK</div>
+          <div className="iron-kbd-front-lip" />
+          <div className="iron-kbd-vents left" />
+          <div className="iron-kbd-vents right" />
+          <div className="iron-kbd-keyfield">
+            {KEYBOARD_LAYOUT.map((row, rowIndex) => (
+              <div key={`row-${rowIndex}`} className="kbd-row">
+                {row.map((key, keyIndex) => {
+                  const label = normalizeKeyLabel(key);
+                  return (
+                    <span
+                      key={`${rowIndex}-${keyIndex}-${key}`}
+                      className={[
+                        key === "SPACE" ? "wide space" : "",
+                        key === "BACK" ? "wide back" : "",
+                        key === "ENTER" ? "wide enter" : "",
+                        key === "TAB" ? "wide tab" : "",
+                        key === "CAPS" ? "wide caps" : "",
+                        key === "SHIFT" ? "wide shift" : "",
+                        key === "BLANK" ? "blank" : "",
+                        activeKeys.includes(label) ? "active" : ""
+                      ]
+                        .filter(Boolean)
+                        .join(" ") || undefined}
+                    >
+                      {key === "BLANK" ? "" : key}
+                    </span>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          <div className="iron-panel-lines">
+            <span className="line line-a" />
+            <span className="line line-b" />
+            <span className="line line-c" />
+            <span className="line line-d" />
+          </div>
+          <div className="iron-mask-emboss" />
+        </div>
+        <div className="hud-footer-controls">
+          <button className="mini-btn" onClick={() => setAudioCuesEnabled((prev) => !prev)}>
+            Audio {audioCuesEnabled ? "ON" : "OFF"}
+          </button>
+          <button
+            className="mini-btn"
+            onClick={() => {
+              void runCommand("/time", true);
+            }}
+          >
+            Speak Time
+          </button>
+          <button
+            className="mini-btn"
+            onClick={() => {
+              void runCommand("/greet", true);
+            }}
+          >
+            Greet
+          </button>
+        </div>
       </footer>
     </div>
   );
