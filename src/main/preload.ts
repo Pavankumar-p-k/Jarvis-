@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
+  type BackendRuntimeOptionsUpdate,
   IPC_CHANNELS,
   type CommandFeedbackEvent,
   type CreateCustomCommandInput,
@@ -38,6 +39,10 @@ const api: JarvisApi = {
     ipcRenderer.invoke(IPC_CHANNELS.pushVoiceAudio, base64Audio, mimeType),
   simulateVoiceTranscript: async (transcript: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.simulateVoiceTranscript, transcript),
+  getBackendOptions: async () => ipcRenderer.invoke(IPC_CHANNELS.getBackendOptions),
+  updateBackendOptions: async (updates: BackendRuntimeOptionsUpdate) =>
+    ipcRenderer.invoke(IPC_CHANNELS.updateBackendOptions, updates),
+  resetBackendOptions: async () => ipcRenderer.invoke(IPC_CHANNELS.resetBackendOptions),
   onVoiceEvent: (listener: (event: VoiceEvent) => void) => {
     const wrapped = (_event: unknown, payload: VoiceEvent) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.voiceEvent, wrapped);

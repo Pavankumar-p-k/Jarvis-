@@ -5,16 +5,27 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { VoiceBackend, VoiceEvent, VoiceStatus } from "../../shared/contracts";
+import type {
+  VoiceBackend,
+  VoiceEvent,
+  VoiceRuntimeOptions,
+  VoiceRuntimeOptionsUpdate,
+  VoiceStatus
+} from "../../shared/contracts";
 import { Logger } from "./logger";
 
 const requireFromHere = createRequire(__filename);
 const execFileAsync = promisify(execFile);
 
 interface VoiceServiceOptions {
+  enabled?: boolean;
   wakeWord?: string;
   whisperCliPath?: string;
   whisperModelPath?: string;
+  wakeRmsThreshold?: number;
+  wakeRequiredHits?: number;
+  wakeCooldownMs?: number;
+  commandWindowMs?: number;
   onCommand: (command: string) => Promise<string | void>;
   onEvent?: (event: VoiceEvent) => void;
 }
@@ -40,6 +51,10 @@ interface WavMeta {
 type UnknownRecord = Record<string, unknown>;
 
 const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
+const toFiniteOr = (value: unknown, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 
 const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error) {
@@ -158,16 +173,16 @@ const rmsFromPcm16Wav = (buffer: Buffer): number | null => {
  */
 export class VoiceService {
   private readonly logger = new Logger();
-  private readonly wakeWord: string;
+  private wakeWord: string;
   private readonly onCommand: (command: string) => Promise<string | void>;
   private readonly onEvent?: (event: VoiceEvent) => void;
-  private readonly whisperCliPath?: string;
-  private readonly whisperModelPath?: string;
+  private whisperCliPath?: string;
+  private whisperModelPath?: string;
 
-  private readonly wakeRmsThreshold: number;
-  private readonly wakeRequiredHits: number;
-  private readonly wakeCooldownMs: number;
-  private readonly commandWindowMs: number;
+  private wakeRmsThreshold: number;
+  private wakeRequiredHits: number;
+  private wakeCooldownMs: number;
+  private commandWindowMs: number;
 
   private enabled = false;
   private processing = false;
@@ -187,18 +202,31 @@ export class VoiceService {
     this.whisperCliPath = options.whisperCliPath ?? process.env.JARVIS_WHISPER_CPP;
     this.whisperModelPath = options.whisperModelPath ?? process.env.JARVIS_WHISPER_MODEL;
 
-    this.wakeRmsThreshold = Number(process.env.JARVIS_WAKE_RMS ?? "0.045");
-    this.wakeRequiredHits = Math.max(1, Number(process.env.JARVIS_WAKE_HITS ?? "2"));
-    this.wakeCooldownMs = Math.max(500, Number(process.env.JARVIS_WAKE_COOLDOWN_MS ?? "3500"));
-    this.commandWindowMs = Math.max(1500, Number(process.env.JARVIS_COMMAND_WINDOW_MS ?? "7000"));
+    this.wakeRmsThreshold = Math.max(
+      0.001,
+      Math.min(1, toFiniteOr(options.wakeRmsThreshold ?? process.env.JARVIS_WAKE_RMS, 0.045))
+    );
+    this.wakeRequiredHits = Math.max(
+      1,
+      toFiniteOr(options.wakeRequiredHits ?? process.env.JARVIS_WAKE_HITS, 2)
+    );
+    this.wakeCooldownMs = Math.max(
+      500,
+      toFiniteOr(options.wakeCooldownMs ?? process.env.JARVIS_WAKE_COOLDOWN_MS, 3500)
+    );
+    this.commandWindowMs = Math.max(
+      1500,
+      toFiniteOr(options.commandWindowMs ?? process.env.JARVIS_COMMAND_WINDOW_MS, 7000)
+    );
 
     this.status = {
-      enabled: false,
-      listening: false,
+      enabled: Boolean(options.enabled),
+      listening: Boolean(options.enabled),
       wakeWord: this.wakeWord,
       backend: "stub",
       pendingAudioChunks: 0
     };
+    this.enabled = this.status.enabled;
   }
 
   /**
@@ -224,6 +252,63 @@ export class VoiceService {
 
   getStatus(): VoiceStatus {
     return { ...this.status };
+  }
+
+  getConfig(): VoiceRuntimeOptions {
+    return {
+      enabled: this.enabled,
+      wakeWord: this.wakeWord,
+      wakeRmsThreshold: this.wakeRmsThreshold,
+      wakeRequiredHits: this.wakeRequiredHits,
+      wakeCooldownMs: this.wakeCooldownMs,
+      commandWindowMs: this.commandWindowMs,
+      whisperCliPath: this.whisperCliPath,
+      whisperModelPath: this.whisperModelPath
+    };
+  }
+
+  async configure(updates: VoiceRuntimeOptionsUpdate): Promise<VoiceStatus> {
+    if (updates.wakeWord !== undefined) {
+      this.wakeWord = normalizeText(updates.wakeWord).toLowerCase() || this.wakeWord;
+      this.status.wakeWord = this.wakeWord;
+    }
+
+    if (updates.wakeRmsThreshold !== undefined) {
+      this.wakeRmsThreshold = Math.max(0.001, Math.min(1, toFiniteOr(updates.wakeRmsThreshold, 0.045)));
+    }
+
+    if (updates.wakeRequiredHits !== undefined) {
+      this.wakeRequiredHits = Math.max(1, Math.round(toFiniteOr(updates.wakeRequiredHits, this.wakeRequiredHits)));
+    }
+
+    if (updates.wakeCooldownMs !== undefined) {
+      this.wakeCooldownMs = Math.max(500, Math.round(toFiniteOr(updates.wakeCooldownMs, this.wakeCooldownMs)));
+    }
+
+    if (updates.commandWindowMs !== undefined) {
+      this.commandWindowMs = Math.max(
+        1500,
+        Math.round(toFiniteOr(updates.commandWindowMs, this.commandWindowMs))
+      );
+    }
+
+    if (updates.whisperCliPath !== undefined) {
+      const next = normalizeText(updates.whisperCliPath);
+      this.whisperCliPath = next || undefined;
+    }
+
+    if (updates.whisperModelPath !== undefined) {
+      const next = normalizeText(updates.whisperModelPath);
+      this.whisperModelPath = next || undefined;
+    }
+
+    if (updates.enabled !== undefined) {
+      await this.setEnabled(updates.enabled);
+    }
+
+    await this.detectBackend();
+    this.emitStatus();
+    return this.getStatus();
   }
 
   async setEnabled(enabled: boolean): Promise<VoiceStatus> {

@@ -41,10 +41,19 @@ export const CustomCommandsPanel = ({
   };
 
   const handleCreate = async (): Promise<void> => {
+    const cleanName = name.trim();
+    const cleanTrigger = trigger.trim();
+    const cleanAction = action.trim();
+
+    if (cleanName.length < 2 || cleanTrigger.length < 2 || cleanAction.length < 1) {
+      setError("Name and trigger need 2+ chars, and action is required.");
+      return;
+    }
+
     const payload: CreateCustomCommandInput = {
-      name,
-      trigger,
-      action,
+      name: cleanName,
+      trigger: cleanTrigger,
+      action: cleanAction,
       passThroughArgs
     };
 
@@ -85,7 +94,7 @@ export const CustomCommandsPanel = ({
   return (
     <section className="panel custom-command-panel">
       <header className="panel-title">
-        Custom Commands
+        <span>Custom Commands</span>
         <button
           type="button"
           className="mini-btn"
@@ -98,41 +107,56 @@ export const CustomCommandsPanel = ({
         </button>
       </header>
 
-      <div className="custom-command-form">
+      <form
+        className="custom-command-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void handleCreate();
+        }}
+      >
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
           placeholder="Name (e.g. Start focus sprint)"
+          maxLength={80}
+          disabled={busy}
         />
         <input
           value={trigger}
           onChange={(event) => setTrigger(event.target.value)}
           placeholder="Trigger (e.g. start sprint)"
+          maxLength={120}
+          disabled={busy}
         />
         <input
           value={action}
           onChange={(event) => setAction(event.target.value)}
           placeholder="Action (e.g. run routine focus sprint)"
+          maxLength={220}
+          disabled={busy}
         />
         <label className="custom-args-toggle">
           <input
             type="checkbox"
             checked={passThroughArgs}
             onChange={(event) => setPassThroughArgs(event.target.checked)}
+            disabled={busy}
           />
           Forward extra words to action
         </label>
+        <div className="custom-command-hint">
+          Use in terminal: <code>{trigger.trim() || "your trigger"}</code>
+        </div>
         <button
-          type="button"
+          type="submit"
           className="mini-btn"
-          onClick={() => {
-            void handleCreate();
-          }}
-          disabled={busy}
+          disabled={
+            busy || name.trim().length < 2 || trigger.trim().length < 2 || action.trim().length < 1
+          }
         >
-          Add Command
+          {busy ? "Saving..." : "Add Command"}
         </button>
-      </div>
+      </form>
 
       {error && <p className="custom-command-error">{error}</p>}
 
@@ -157,6 +181,7 @@ export const CustomCommandsPanel = ({
                     await onTestRun(command.name);
                   });
                 }}
+                disabled={busy}
               >
                 Test Run
               </button>
@@ -168,6 +193,7 @@ export const CustomCommandsPanel = ({
                     await onUpdate(command.id, { enabled: !command.enabled });
                   });
                 }}
+                disabled={busy}
               >
                 {command.enabled ? "Disable" : "Enable"}
               </button>
@@ -177,6 +203,7 @@ export const CustomCommandsPanel = ({
                 onClick={() => {
                   void handleEdit(command);
                 }}
+                disabled={busy}
               >
                 Edit
               </button>
@@ -188,6 +215,7 @@ export const CustomCommandsPanel = ({
                     await onDelete(command.id);
                   });
                 }}
+                disabled={busy}
               >
                 Delete
               </button>

@@ -215,6 +215,54 @@ export interface VoiceEvent {
   message?: string;
 }
 
+export interface VoiceRuntimeOptions {
+  enabled: boolean;
+  wakeWord: string;
+  wakeRmsThreshold: number;
+  wakeRequiredHits: number;
+  wakeCooldownMs: number;
+  commandWindowMs: number;
+  whisperCliPath?: string;
+  whisperModelPath?: string;
+}
+
+export interface VoiceRuntimeOptionsUpdate {
+  enabled?: boolean;
+  wakeWord?: string;
+  wakeRmsThreshold?: number;
+  wakeRequiredHits?: number;
+  wakeCooldownMs?: number;
+  commandWindowMs?: number;
+  whisperCliPath?: string;
+  whisperModelPath?: string;
+}
+
+export interface LlmRuntimeOptions {
+  enabled: boolean;
+  endpoint: string;
+  model: string;
+  timeoutMs: number;
+}
+
+export interface LlmRuntimeOptionsUpdate {
+  enabled?: boolean;
+  endpoint?: string;
+  model?: string;
+  timeoutMs?: number;
+}
+
+export interface BackendRuntimeOptions {
+  strictOffline: boolean;
+  voice: VoiceRuntimeOptions;
+  llm: LlmRuntimeOptions;
+}
+
+export interface BackendRuntimeOptionsUpdate {
+  strictOffline?: boolean;
+  voice?: VoiceRuntimeOptionsUpdate;
+  llm?: LlmRuntimeOptionsUpdate;
+}
+
 export interface AssistantState {
   mode: MissionMode;
   telemetry: TelemetrySnapshot;
@@ -254,6 +302,9 @@ export interface JarvisApi {
   setVoiceEnabled: (enabled: boolean) => Promise<VoiceStatus>;
   pushVoiceAudio: (base64Audio: string, mimeType?: string) => Promise<VoiceStatus>;
   simulateVoiceTranscript: (transcript: string) => Promise<VoiceStatus>;
+  getBackendOptions: () => Promise<BackendRuntimeOptions>;
+  updateBackendOptions: (updates: BackendRuntimeOptionsUpdate) => Promise<BackendRuntimeOptions>;
+  resetBackendOptions: () => Promise<BackendRuntimeOptions>;
   onVoiceEvent: (listener: (event: VoiceEvent) => void) => () => void;
   onCommandFeedback: (listener: (event: CommandFeedbackEvent) => void) => () => void;
 }
@@ -278,6 +329,9 @@ export const IPC_CHANNELS = {
   setVoiceEnabled: "jarvis:set-voice-enabled",
   pushVoiceAudio: "jarvis:push-voice-audio",
   simulateVoiceTranscript: "jarvis:simulate-voice-transcript",
+  getBackendOptions: "jarvis:get-backend-options",
+  updateBackendOptions: "jarvis:update-backend-options",
+  resetBackendOptions: "jarvis:reset-backend-options",
   voiceEvent: "jarvis:voice-event",
   commandFeedback: "jarvis:command-feedback"
 } as const;

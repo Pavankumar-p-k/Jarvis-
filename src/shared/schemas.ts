@@ -41,3 +41,31 @@ export const voiceAudioSchema = z.object({
 export const voiceEnabledSchema = z.boolean();
 
 export const voiceTranscriptSchema = z.string().trim().min(1).max(300);
+
+export const backendOptionsUpdateSchema = z
+  .object({
+    strictOffline: z.boolean().optional(),
+    voice: z
+      .object({
+        enabled: z.boolean().optional(),
+        wakeWord: z.string().trim().min(1).max(40).optional(),
+        wakeRmsThreshold: z.number().min(0.001).max(1).optional(),
+        wakeRequiredHits: z.number().int().min(1).max(12).optional(),
+        wakeCooldownMs: z.number().int().min(300).max(60_000).optional(),
+        commandWindowMs: z.number().int().min(1_000).max(60_000).optional(),
+        whisperCliPath: z.string().trim().max(320).optional(),
+        whisperModelPath: z.string().trim().max(320).optional()
+      })
+      .optional(),
+    llm: z
+      .object({
+        enabled: z.boolean().optional(),
+        endpoint: z.string().trim().min(1).max(320).optional(),
+        model: z.string().trim().min(1).max(80).optional(),
+        timeoutMs: z.number().int().min(500).max(30_000).optional()
+      })
+      .optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "At least one backend option must be provided."
+  });

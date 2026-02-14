@@ -10,6 +10,8 @@ import type {
   CommandResponse,
   CreateCustomCommandInput,
   CustomCommand,
+  LlmRuntimeOptions,
+  LlmRuntimeOptionsUpdate,
   MissionMode,
   MorningBriefing,
   PermissionLevel,
@@ -38,6 +40,7 @@ interface RuntimeOptions {
   dataDir: string;
   pluginsDir: string;
   strictOffline?: boolean;
+  llmAdapter?: LocalLlmAdapter;
   openExternalUrl?: (url: string) => Promise<void>;
   onCommandFeedback?: (event: CommandFeedbackEvent) => void;
 }
@@ -105,6 +108,7 @@ const defaultAutomations = () => [
 
 const appLaunchMap: Record<string, AppLaunchSpec> = {
   chrome: { file: "cmd", args: ["/c", "start", "", "chrome"] },
+  vlc: { file: "cmd", args: ["/c", "start", "", "vlc"] },
   vscode: { file: "cmd", args: ["/c", "start", "", "code"] },
   spotify: { file: "cmd", args: ["/c", "start", "", "spotify"] },
   notepad: { file: "cmd", args: ["/c", "start", "", "notepad"] },
@@ -124,19 +128,20 @@ export class JarvisRuntime {
   private readonly scheduler = new Scheduler();
   private readonly automationEngine = new AutomationEngine();
   private readonly briefingService = new BriefingService();
-  private readonly llm = new LocalLlmAdapter();
+  private readonly llm: LocalLlmAdapter;
   private readonly pluginService: PluginService;
   private readonly customCommandService: CustomCommandService;
   private readonly stateStore: JsonStore<AssistantState>;
   private readonly openExternalUrl?: (url: string) => Promise<void>;
   private readonly onCommandFeedback?: (event: CommandFeedbackEvent) => void;
-  private readonly strictOffline: boolean;
+  private strictOffline: boolean;
   private state: AssistantState;
 
   constructor(options: RuntimeOptions) {
     this.stateStore = new JsonStore(join(options.dataDir, "state.json"));
     this.pluginService = new PluginService(options.pluginsDir, this.logger);
     this.customCommandService = new CustomCommandService(join(options.dataDir, "custom-commands.json"));
+    this.llm = options.llmAdapter ?? new LocalLlmAdapter();
     this.openExternalUrl = options.openExternalUrl;
     this.onCommandFeedback = options.onCommandFeedback;
     this.strictOffline = options.strictOffline ?? true;
@@ -178,6 +183,22 @@ export class JarvisRuntime {
 
   listCustomCommands(): CustomCommand[] {
     return this.customCommandService.list();
+  }
+
+  getLlmOptions(): LlmRuntimeOptions {
+    return this.llm.getOptions();
+  }
+
+  setLlmOptions(updates: LlmRuntimeOptionsUpdate): LlmRuntimeOptions {
+    return this.llm.setOptions(updates);
+  }
+
+  getStrictOffline(): boolean {
+    return this.strictOffline;
+  }
+
+  setStrictOffline(enabled: boolean): void {
+    this.strictOffline = enabled;
   }
 
   async setMode(mode: MissionMode): Promise<AssistantState> {

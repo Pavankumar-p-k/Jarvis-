@@ -1,6 +1,8 @@
 import { ipcMain } from "electron";
-import { IPC_CHANNELS, type MissionMode } from "../../shared/contracts";
+import type { BackendRuntimeOptions, BackendRuntimeOptionsUpdate, MissionMode } from "../../shared/contracts";
+import { IPC_CHANNELS } from "../../shared/contracts";
 import {
+  backendOptionsUpdateSchema,
   commandSchema,
   customCommandCreateSchema,
   customCommandNameSchema,
@@ -20,7 +22,17 @@ const replaceHandler = (
   ipcMain.handle(channel, handler);
 };
 
-export const registerIpcHandlers = (runtime: JarvisRuntime, voiceService: VoiceService): void => {
+export interface BackendOptionsController {
+  getBackendOptions: () => BackendRuntimeOptions;
+  updateBackendOptions: (updates: BackendRuntimeOptionsUpdate) => Promise<BackendRuntimeOptions> | BackendRuntimeOptions;
+  resetBackendOptions: () => Promise<BackendRuntimeOptions> | BackendRuntimeOptions;
+}
+
+export const registerIpcHandlers = (
+  runtime: JarvisRuntime,
+  voiceService: VoiceService,
+  backendOptionsController?: BackendOptionsController
+): void => {
   replaceHandler(IPC_CHANNELS.getState, async () => runtime.getState());
 
   replaceHandler(IPC_CHANNELS.runCommand, async (_event, command: string, bypassConfirmation?: boolean) => {
@@ -97,5 +109,46 @@ export const registerIpcHandlers = (runtime: JarvisRuntime, voiceService: VoiceS
   replaceHandler(IPC_CHANNELS.simulateVoiceTranscript, async (_event, transcript: string) => {
     const payload = voiceTranscriptSchema.parse(transcript);
     return voiceService.simulateTranscript(payload);
+  });
+
+  replaceHandler(IPC_CHANNELS.getBackendOptions, async () => {
+    if (!backendOptionsController) {
+      return {
+        strictOffline: runtime.getStrictOffline(),
+        voice: voiceService.getConfig(),
+        llm: runtime.getLlmOptions()
+      };
+    }
+
+    return backendOptionsController.getBackendOptions();
+  });
+
+  replaceHandler(IPC_CHANNELS.updateBackendOptions, async (_event, updates: unknown) => {
+    const payload = backendOptionsUpdateSchema.parse(updates);
+
+    if (!backendOptionsController) {
+      runtime.setStrictOffline(payload.strictOffline ?? runtime.getStrictOffline());
+      runtime.setLlmOptions(payload.llm ?? {});
+      await voiceService.configure(payload.voice ?? {});
+      return {
+        strictOffline: runtime.getStrictOffline(),
+        voice: voiceService.getConfig(),
+        llm: runtime.getLlmOptions()
+      };
+    }
+
+    return backendOptionsController.updateBackendOptions(payload);
+  });
+
+  replaceHandler(IPC_CHANNELS.resetBackendOptions, async () => {
+    if (!backendOptionsController) {
+      return {
+        strictOffline: runtime.getStrictOffline(),
+        voice: voiceService.getConfig(),
+        llm: runtime.getLlmOptions()
+      };
+    }
+
+    return backendOptionsController.resetBackendOptions();
   });
 };

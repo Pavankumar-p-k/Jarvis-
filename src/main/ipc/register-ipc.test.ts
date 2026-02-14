@@ -33,7 +33,21 @@ const makeRuntime = () => {
     updateCustomCommand: vi.fn(async () => ({ mode: "work" })),
     deleteCustomCommand: vi.fn(async () => ({ mode: "work" })),
     listCustomCommands: vi.fn(() => []),
-    runCustomCommandByName: vi.fn(async () => ({ result: { ok: true, message: "ran" }, state: { mode: "work" } }))
+    runCustomCommandByName: vi.fn(async () => ({ result: { ok: true, message: "ran" }, state: { mode: "work" } })),
+    getStrictOffline: vi.fn(() => true),
+    setStrictOffline: vi.fn(() => undefined),
+    getLlmOptions: vi.fn(() => ({
+      enabled: true,
+      endpoint: "http://127.0.0.1:11434/api/generate",
+      model: "llama3.1:8b",
+      timeoutMs: 4500
+    })),
+    setLlmOptions: vi.fn(() => ({
+      enabled: true,
+      endpoint: "http://127.0.0.1:11434/api/generate",
+      model: "llama3.1:8b",
+      timeoutMs: 4500
+    }))
   };
 };
 
@@ -42,7 +56,16 @@ const makeVoiceService = () => {
     getStatus: vi.fn(() => ({ enabled: false })),
     setEnabled: vi.fn(async () => ({ enabled: true })),
     pushAudio: vi.fn(async () => ({ enabled: true })),
-    simulateTranscript: vi.fn(async () => ({ enabled: true }))
+    simulateTranscript: vi.fn(async () => ({ enabled: true })),
+    getConfig: vi.fn(() => ({
+      enabled: false,
+      wakeWord: "jarvis",
+      wakeRmsThreshold: 0.045,
+      wakeRequiredHits: 2,
+      wakeCooldownMs: 3500,
+      commandWindowMs: 7000
+    })),
+    configure: vi.fn(async () => ({ enabled: true }))
   };
 };
 
@@ -99,5 +122,19 @@ describe("registerIpcHandlers", () => {
     });
 
     expect(runtime.createCustomCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers backend options handlers", async () => {
+    const runtime = makeRuntime();
+    const voiceService = makeVoiceService();
+
+    registerIpcHandlers(
+      runtime as unknown as Parameters<typeof registerIpcHandlers>[0],
+      voiceService as unknown as Parameters<typeof registerIpcHandlers>[1]
+    );
+
+    expect(handlerMap.has(IPC_CHANNELS.getBackendOptions)).toBe(true);
+    expect(handlerMap.has(IPC_CHANNELS.updateBackendOptions)).toBe(true);
+    expect(handlerMap.has(IPC_CHANNELS.resetBackendOptions)).toBe(true);
   });
 });

@@ -3,8 +3,10 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { CommandFeedbackEvent, VoiceEvent } from "../shared/contracts";
 import { IPC_CHANNELS } from "../shared/contracts";
+import { BackendOptionsService, buildDefaultBackendOptions } from "./core/backend-options-service";
 import { JarvisRuntime } from "./core/jarvis-runtime";
 import { isOfflineSafeUrl, strictOfflineEnabled } from "./core/offline-policy";
+import { LocalLlmAdapter } from "./core/llm-adapter";
 import { VoiceService } from "./core/voice-service";
 import { registerIpcHandlers } from "./ipc/register-ipc";
 
@@ -51,31 +53,55 @@ const createWindow = async (): Promise<void> => {
     win.webContents.send(IPC_CHANNELS.commandFeedback, event);
   };
 
-  if (strictOffline) {
-    win.webContents.session.webRequest.onBeforeRequest((details, callback) => {
-      callback({ cancel: !isOfflineSafeUrl(details.url) });
-    });
+  const backendOptionsService = new BackendOptionsService(
+    join(app.getPath("userData"), "data", "backend-options.json"),
+    {
+      ...buildDefaultBackendOptions(),
+      strictOffline
+    }
+  );
+  const backendOptions = backendOptionsService.init();
+  let strictOfflineActive = backendOptions.strictOffline;
 
-    win.webContents.on("will-navigate", (event, url) => {
-      if (!isOfflineSafeUrl(url)) {
-        event.preventDefault();
-      }
-    });
+  win.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+    if (!strictOfflineActive) {
+      callback({ cancel: false });
+      return;
+    }
+    callback({ cancel: !isOfflineSafeUrl(details.url) });
+  });
 
-    win.webContents.setWindowOpenHandler(({ url }) => {
-      if (!isOfflineSafeUrl(url)) {
-        return { action: "deny" };
-      }
+  win.webContents.on("will-navigate", (event, url) => {
+    if (!strictOfflineActive) {
+      return;
+    }
 
-      void shell.openExternal(url);
+    if (!isOfflineSafeUrl(url)) {
+      event.preventDefault();
+    }
+  });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (strictOfflineActive && !isOfflineSafeUrl(url)) {
       return { action: "deny" };
-    });
-  }
+    }
+
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  const llmAdapter = new LocalLlmAdapter(
+    backendOptions.llm.endpoint,
+    backendOptions.llm.model,
+    backendOptions.llm.timeoutMs,
+    backendOptions.llm.enabled
+  );
 
   const runtime = new JarvisRuntime({
     dataDir: join(app.getPath("userData"), "data"),
     pluginsDir: join(process.cwd(), "plugins"),
-    strictOffline,
+    strictOffline: strictOfflineActive,
+    llmAdapter,
     openExternalUrl: async (url) => {
       await shell.openExternal(url);
     },
@@ -84,22 +110,49 @@ const createWindow = async (): Promise<void> => {
   await runtime.init();
 
   const voiceService = new VoiceService({
-    wakeWord: process.env.JARVIS_WAKE_WORD ?? "jarvis",
+    enabled: backendOptions.voice.enabled,
+    wakeWord: backendOptions.voice.wakeWord,
     onCommand: async (command) => {
       const response = await runtime.runCommand(command, false, "voice");
       return response.result.message;
     },
     onEvent: sendVoiceEvent,
-    whisperCliPath: process.env.JARVIS_WHISPER_CPP,
-    whisperModelPath: process.env.JARVIS_WHISPER_MODEL
+    whisperCliPath: backendOptions.voice.whisperCliPath,
+    whisperModelPath: backendOptions.voice.whisperModelPath,
+    wakeRmsThreshold: backendOptions.voice.wakeRmsThreshold,
+    wakeRequiredHits: backendOptions.voice.wakeRequiredHits,
+    wakeCooldownMs: backendOptions.voice.wakeCooldownMs,
+    commandWindowMs: backendOptions.voice.commandWindowMs
   });
   await voiceService.init();
 
-  registerIpcHandlers(runtime, voiceService);
+  const applyBackendOptions = async (): Promise<void> => {
+    const applied = backendOptionsService.get();
+    strictOfflineActive = applied.strictOffline;
+    runtime.setStrictOffline(applied.strictOffline);
+    runtime.setLlmOptions(applied.llm);
+    await voiceService.configure(applied.voice);
+  };
+
+  await applyBackendOptions();
+
+  registerIpcHandlers(runtime, voiceService, {
+    getBackendOptions: () => backendOptionsService.get(),
+    updateBackendOptions: async (updates) => {
+      backendOptionsService.update(updates);
+      await applyBackendOptions();
+      return backendOptionsService.get();
+    },
+    resetBackendOptions: async () => {
+      backendOptionsService.reset();
+      await applyBackendOptions();
+      return backendOptionsService.get();
+    }
+  });
 
   if (isDev) {
     const devUrl = process.env.JARVIS_DEV_SERVER_URL as string;
-    if (strictOffline && !isOfflineSafeUrl(devUrl)) {
+    if (strictOfflineActive && !isOfflineSafeUrl(devUrl)) {
       throw new Error("JARVIS_DEV_SERVER_URL must be local in strict offline mode.");
     }
     await win.loadURL(devUrl);
